@@ -1,8 +1,8 @@
-# Windows Hermes Proxy MCP
+# Hermes Bridge MCP
 
 Bridge Docker-hosted Hermes to native Windows Hermes through MCP.
 
-This package keeps the normal Windows Hermes conversation MCP tools and adds a
+Hermes Bridge MCP keeps the normal Windows Hermes conversation MCP tools and adds a
 high-level proxy tool so a Docker Hermes agent can delegate work to the native
 Windows Hermes agent when it needs Windows-local filesystem, process, desktop,
 credential, or host integration access.
