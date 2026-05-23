@@ -37,17 +37,17 @@ Write-Host "Installed hidden Startup launchers to: $StartupDir"
 
 if (Get-Command supergateway.cmd -ErrorAction SilentlyContinue) {
     Write-Host "Starting Windows Hermes gateway..."
-    powershell -NoProfile -ExecutionPolicy Bypass -File $gateway | Out-Host
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $gateway
 
     Write-Host "Starting Windows Hermes MCP bridge..."
-    powershell -NoProfile -ExecutionPolicy Bypass -File $bridge | Out-Host
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $bridge -Restart
 } else {
     Write-Warning "supergateway.cmd was not found. Install it with: npm install -g supergateway"
 }
 
 Write-Host ""
-Write-Host "Docker Hermes config:"
-Write-Host "  windows-hermes -> http://host.docker.internal:18082/mcp"
+Write-Host "MCP client config:"
+Write-Host "  hermes-bridge -> http://host.docker.internal:18082/mcp"
 Write-Host ""
-Write-Host "Verify from Docker Hermes:"
-Write-Host "  hermes mcp test windows-hermes"
+Write-Host "Verify from an MCP client/container:"
+Write-Host "  http://host.docker.internal:18082/healthz"

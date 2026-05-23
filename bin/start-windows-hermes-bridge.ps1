@@ -1,3 +1,7 @@
+param(
+    [switch]$Restart
+)
+
 $ErrorActionPreference = "Stop"
 
 $HermesExe = "$env:LOCALAPPDATA\hermes\hermes-agent\venv\Scripts\hermes.exe"
@@ -31,26 +35,33 @@ function Get-ListenerPid {
     return $null
 }
 
+function Stop-ProcessTree {
+    param([int]$ProcessId)
+    if ($ProcessId -le 0) { return }
+    if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return }
+    & "$env:WINDIR\System32\taskkill.exe" /PID $ProcessId /T /F *>$null
+}
+
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-if ((-not (Test-Path $PidPath)) -and (Test-PortOpen -PortToCheck $Port)) {
-    $existingPid = Get-ListenerPid -PortToCheck $Port
-    if ($existingPid) { $existingPid | Set-Content -Path $PidPath -NoNewline }
-    Write-Output "OK: existing bridge is already listening on port $Port"
+$listenerPid = Get-ListenerPid -PortToCheck $Port
+$oldPid = $null
+if (Test-Path $PidPath) {
+    $oldPidRaw = Get-Content $PidPath -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($oldPidRaw) { $oldPid = [int]$oldPidRaw }
+}
+
+if ($listenerPid -and -not $Restart) {
+    if ($oldPid -ne $listenerPid) {
+        $listenerPid | Set-Content -Path $PidPath -NoNewline
+    }
+    Write-Output "OK: existing bridge PID=$listenerPid is already listening on port $Port"
     return
 }
 
-if (Test-Path $PidPath) {
-    $oldPid = Get-Content $PidPath -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($oldPid) {
-        Stop-Process -Id ([int]$oldPid) -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item $PidPath -Force -ErrorAction SilentlyContinue
-}
-
-Get-Process hermes -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -eq $HermesExe } |
-    Stop-Process -Force -ErrorAction SilentlyContinue
+if ($oldPid) { Stop-ProcessTree -ProcessId $oldPid }
+if ($listenerPid -and ($listenerPid -ne $oldPid)) { Stop-ProcessTree -ProcessId $listenerPid }
+Remove-Item $PidPath -Force -ErrorAction SilentlyContinue
 
 Start-Sleep -Seconds 1
 
@@ -75,12 +86,13 @@ $arguments = @(
 )
 
 $process = Start-Process -FilePath $supergateway -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput $LogPath -RedirectStandardError $ErrPath -PassThru
-$process.Id | Set-Content -Path $PidPath -NoNewline
 
 Start-Sleep -Seconds 3
 
 if (Test-PortOpen -PortToCheck $Port) {
-    Write-Output "OK: supergateway PID=$($process.Id) listening on port $Port"
+    $newListenerPid = Get-ListenerPid -PortToCheck $Port
+    if ($newListenerPid) { $newListenerPid | Set-Content -Path $PidPath -NoNewline }
+    Write-Output "OK: supergateway PID=$newListenerPid listening on port $Port"
 } else {
     Write-Output "WARN: supergateway PID=$($process.Id) started but port $Port is not reachable"
     Write-Output "--- stderr (last 20 lines) ---"
