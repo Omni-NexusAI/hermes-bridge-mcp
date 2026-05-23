@@ -39,6 +39,7 @@ def configure(settings: dict, name: str, url: str) -> tuple[dict, bool]:
     servers = parsed["mcpServers"]
     desired = {
         "description": "Hermes Bridge MCP: delegate container agent tasks to native Windows Hermes",
+        "type": "streamable-http",
         "url": url,
         "disabled": False,
         "init_timeout": 30,

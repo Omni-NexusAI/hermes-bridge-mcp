@@ -51,13 +51,15 @@ For MCP clients that accept URL servers, add:
 ```yaml
 mcp_servers:
   hermes-bridge:
+    type: streamable-http
     url: http://host.docker.internal:18082/mcp
     timeout: 120
     connect_timeout: 30
 ```
 
 Do not add `transport: sse` for this bridge. It uses supergateway
-Streamable HTTP at `/mcp`.
+Streamable HTTP at `/mcp`. Clients that default URL servers to SSE, including
+A0, must be told that this entry is `type: streamable-http`.
 
 ## A0 Integration
 
@@ -71,7 +73,7 @@ python scripts/configure-a0-mcp.py --settings /a0/usr/settings.json
 
 The helper writes a timestamped backup next to `settings.json` before changing
 the file. The added server is named `hermes-bridge` and points at
-`http://host.docker.internal:18082/mcp`.
+`http://host.docker.internal:18082/mcp` with `type` set to `streamable-http`.
 
 To preview the change:
 
