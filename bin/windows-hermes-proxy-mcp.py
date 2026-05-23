@@ -30,6 +30,26 @@ def _tail(text: str, max_chars: int = 8000) -> str:
     return text[-max_chars:]
 
 
+def _windows_exit_code(returncode: Optional[int]) -> Optional[int]:
+    if returncode is None:
+        return None
+    if os.name == "nt" and returncode > 0x7FFFFFFF:
+        return returncode - 0x100000000
+    return returncode
+
+
+def _child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("USERPROFILE", str(Path.home()))
+    env.setdefault("LOCALAPPDATA", str(HERMES_HOME.parent))
+    env.setdefault("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+    env.setdefault("HERMES_HOME", str(HERMES_HOME))
+    env["PYTHONUTF8"] = "1"
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    return env
+
+
 def _convert_cwd(cwd: Optional[str]) -> tuple[Optional[Path], Optional[str]]:
     if cwd is None or str(cwd).strip() == "":
         return DEFAULT_CWD, None
@@ -52,24 +72,35 @@ def _run_hidden(args: list[str], cwd: Optional[Path], timeout_seconds: int) -> d
     creationflags = 0
     startupinfo = None
     if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0
 
     started = time.monotonic()
-    proc = subprocess.Popen(
-        args,
-        cwd=str(cwd) if cwd else None,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=creationflags,
-        startupinfo=startupinfo,
-    )
+    try:
+        proc = subprocess.Popen(
+            args,
+            cwd=str(cwd) if cwd else None,
+            env=_child_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creationflags,
+            startupinfo=startupinfo,
+        )
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        return {
+            "exit_code": None,
+            "timed_out": False,
+            "elapsed_ms": elapsed_ms,
+            "stdout": "",
+            "stderr_tail": f"{type(exc).__name__}: {exc}",
+        }
 
     timed_out = False
     try:
@@ -90,7 +121,7 @@ def _run_hidden(args: list[str], cwd: Optional[Path], timeout_seconds: int) -> d
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     return {
-        "exit_code": proc.returncode,
+        "exit_code": _windows_exit_code(proc.returncode),
         "timed_out": timed_out,
         "elapsed_ms": elapsed_ms,
         "stdout": _tail(stdout),
