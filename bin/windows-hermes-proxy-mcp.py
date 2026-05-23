@@ -98,22 +98,89 @@ def _run_hidden(args: list[str], cwd: Optional[Path], timeout_seconds: int) -> d
     }
 
 
+def _status_payload() -> str:
+    version = _run_hidden([str(HERMES_EXE), "--version"], cwd=HERMES_AGENT, timeout_seconds=30)
+    config_path = _run_hidden([str(HERMES_EXE), "config", "path"], cwd=HERMES_AGENT, timeout_seconds=30)
+    gateway = _run_hidden([str(HERMES_EXE), "gateway", "status"], cwd=HERMES_AGENT, timeout_seconds=60)
+    return _json({
+        "hermes_exe": str(HERMES_EXE),
+        "hermes_home": str(HERMES_HOME),
+        "default_cwd": str(DEFAULT_CWD),
+        "delegate_runner_available": HERMES_EXE.exists(),
+        "version": version,
+        "config_path": config_path,
+        "gateway_status": gateway,
+    })
+
+
+def _delegate_payload(
+    prompt: str,
+    cwd: Optional[str] = None,
+    timeout_seconds: int = 900,
+    max_turns: int = 90,
+) -> str:
+    if not isinstance(prompt, str) or not prompt.strip():
+        return _json({"error": "prompt is required"})
+    try:
+        timeout_i = max(1, min(int(timeout_seconds), 3600))
+    except Exception:
+        return _json({"error": "timeout_seconds must be an integer"})
+    try:
+        max_turns_i = max(1, min(int(max_turns), 200))
+    except Exception:
+        return _json({"error": "max_turns must be an integer"})
+
+    run_cwd, cwd_error = _convert_cwd(cwd)
+    if cwd_error:
+        return _json({"error": cwd_error, "cwd": cwd})
+
+    if not HERMES_EXE.exists():
+        return _json({"error": "native Windows Hermes executable not found", "hermes_exe": str(HERMES_EXE)})
+
+    args = [
+        str(HERMES_EXE),
+        "chat",
+        "--query", prompt,
+        "--quiet",
+        "--source", "mcp-windows-proxy",
+        "--accept-hooks",
+        "--max-turns", str(max_turns_i),
+    ]
+    result = _run_hidden(args, cwd=run_cwd, timeout_seconds=timeout_i)
+    result.update({
+        "cwd": str(run_cwd),
+        "timeout_seconds": timeout_i,
+        "max_turns": max_turns_i,
+    })
+    return _json(result)
+
+
 def add_windows_proxy_tools(mcp):
     @mcp.tool()
+    def bridge_agent_status() -> str:
+        """Report native bridge agent readiness and gateway status."""
+        return _status_payload()
+
+    @mcp.tool()
+    def bridge_agent_delegate(
+        prompt: str,
+        cwd: Optional[str] = None,
+        timeout_seconds: int = 900,
+        max_turns: int = 90,
+    ) -> str:
+        """Delegate a task prompt to the native bridge agent.
+
+        The task runs through the upstream native agent, not a raw shell proxy.
+        The upstream agent uses its normal tool and approval policy. Use this
+        when a container-hosted MCP client needs native Windows filesystem,
+        process, desktop, credential, or host integration access.
+        """
+        return _delegate_payload(prompt, cwd, timeout_seconds, max_turns)
+
+    @mcp.tool()
     def windows_agent_status() -> str:
-        """Report native Windows Hermes proxy readiness and gateway status."""
-        version = _run_hidden([str(HERMES_EXE), "--version"], cwd=HERMES_AGENT, timeout_seconds=30)
-        config_path = _run_hidden([str(HERMES_EXE), "config", "path"], cwd=HERMES_AGENT, timeout_seconds=30)
-        gateway = _run_hidden([str(HERMES_EXE), "gateway", "status"], cwd=HERMES_AGENT, timeout_seconds=60)
-        return _json({
-            "hermes_exe": str(HERMES_EXE),
-            "hermes_home": str(HERMES_HOME),
-            "default_cwd": str(DEFAULT_CWD),
-            "delegate_runner_available": HERMES_EXE.exists(),
-            "version": version,
-            "config_path": config_path,
-            "gateway_status": gateway,
-        })
+        """Compatibility alias for bridge_agent_status."""
+        return _status_payload()
 
     @mcp.tool()
     def windows_agent_delegate(
@@ -122,47 +189,8 @@ def add_windows_proxy_tools(mcp):
         timeout_seconds: int = 900,
         max_turns: int = 90,
     ) -> str:
-        """Delegate a task prompt to the native Windows Hermes agent.
-
-        The task runs through Windows Hermes itself, not a raw shell proxy. The
-        Windows agent uses its normal tool and approval policy. Use this when a
-        Docker-hosted Hermes agent needs native Windows filesystem, process,
-        desktop, credential, or host integration access.
-        """
-        if not isinstance(prompt, str) or not prompt.strip():
-            return _json({"error": "prompt is required"})
-        try:
-            timeout_i = max(1, min(int(timeout_seconds), 3600))
-        except Exception:
-            return _json({"error": "timeout_seconds must be an integer"})
-        try:
-            max_turns_i = max(1, min(int(max_turns), 200))
-        except Exception:
-            return _json({"error": "max_turns must be an integer"})
-
-        run_cwd, cwd_error = _convert_cwd(cwd)
-        if cwd_error:
-            return _json({"error": cwd_error, "cwd": cwd})
-
-        if not HERMES_EXE.exists():
-            return _json({"error": "native Windows Hermes executable not found", "hermes_exe": str(HERMES_EXE)})
-
-        args = [
-            str(HERMES_EXE),
-            "chat",
-            "--query", prompt,
-            "--quiet",
-            "--source", "mcp-windows-proxy",
-            "--accept-hooks",
-            "--max-turns", str(max_turns_i),
-        ]
-        result = _run_hidden(args, cwd=run_cwd, timeout_seconds=timeout_i)
-        result.update({
-            "cwd": str(run_cwd),
-            "timeout_seconds": timeout_i,
-            "max_turns": max_turns_i,
-        })
-        return _json(result)
+        """Compatibility alias for bridge_agent_delegate."""
+        return _delegate_payload(prompt, cwd, timeout_seconds, max_turns)
 
 
 def main() -> None:
