@@ -38,11 +38,28 @@ npm install -g supergateway
 From this repository on Windows:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -InstallSupergateway
 ```
 
 The installer copies scripts into `%LOCALAPPDATA%\hermes\bin`, creates hidden
-Startup launchers, and can restart the bridge.
+Startup launchers, and can restart the bridge. It prints the MCP client entry
+that any MCP-compatible client should use:
+
+```json
+{
+  "hermes-bridge": {
+    "type": "streamable-http",
+    "url": "http://host.docker.internal:18082/mcp"
+  }
+}
+```
+
+If the A0 `settings.json` file is available from Windows, the installer can
+also add the MCP entry directly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -InstallSupergateway -A0SettingsPath C:\path\to\settings.json
+```
 
 ## MCP Client Config
 
@@ -68,12 +85,14 @@ under `mcp_servers`. Use the helper to add the bridge without replacing other
 MCP servers:
 
 ```bash
-python scripts/configure-a0-mcp.py --settings /a0/usr/settings.json
+python scripts/configure-a0-mcp.py --settings /a0/usr/settings.json --check-health
 ```
 
 The helper writes a timestamped backup next to `settings.json` before changing
 the file. The added server is named `hermes-bridge` and points at
 `http://host.docker.internal:18082/mcp` with `type` set to `streamable-http`.
+The optional health check verifies `http://host.docker.internal:18082/healthz`
+from inside the A0 container, which proves that A0 can reach the Windows bridge.
 Restart A0 after running the helper so the MCP client and settings UI reload the
 entry. Then verify it appears under **Settings > MCP/A2A > External MCP Servers
 > Open** as `hermes-bridge` in the editable JSON and as `hermes_bridge` with
@@ -82,7 +101,7 @@ tools in the server status list.
 To preview the change:
 
 ```bash
-python scripts/configure-a0-mcp.py --settings /a0/usr/settings.json --dry-run
+python scripts/configure-a0-mcp.py --settings /a0/usr/settings.json --dry-run --check-health
 ```
 
 ## Verify
