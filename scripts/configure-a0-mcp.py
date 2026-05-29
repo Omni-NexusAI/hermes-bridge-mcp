@@ -12,6 +12,8 @@ from pathlib import Path
 
 DEFAULT_URL = "http://host.docker.internal:18082/mcp"
 DEFAULT_HEALTH_URL = "http://host.docker.internal:18082/healthz"
+DEFAULT_INIT_TIMEOUT = 30
+DEFAULT_TOOL_TIMEOUT = 900
 
 
 def load_settings(path: Path) -> dict:
@@ -41,12 +43,18 @@ def configure(settings: dict, name: str, url: str) -> tuple[dict, bool]:
     parsed = parse_mcp_servers(settings)
     servers = parsed["mcpServers"]
     desired = {
-        "description": "Hermes Bridge MCP: delegate container agent tasks to native Windows Hermes",
+        "description": (
+            "Hermes Bridge MCP: call bridge_agent_status and bridge_agent_delegate "
+            "through A0's normal MCP tool interface. Do not run raw Python, curl, "
+            "or direct HTTP clients except for diagnostics if the MCP wrapper is broken."
+        ),
         "type": "streamable-http",
         "url": url,
         "disabled": False,
-        "init_timeout": 30,
-        "tool_timeout": 900,
+        "init_timeout": DEFAULT_INIT_TIMEOUT,
+        "connect_timeout": DEFAULT_INIT_TIMEOUT,
+        "tool_timeout": DEFAULT_TOOL_TIMEOUT,
+        "timeout": DEFAULT_TOOL_TIMEOUT,
     }
     changed = servers.get(name) != desired
     servers[name] = desired

@@ -3,16 +3,22 @@
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 HERMES_HOME = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "hermes"
 HERMES_AGENT = HERMES_HOME / "hermes-agent"
 HERMES_EXE = HERMES_AGENT / "venv" / "Scripts" / "hermes.exe"
+HERMES_PYTHON = HERMES_AGENT / "venv" / "Scripts" / "python.exe"
+HERMES_CMD = HERMES_HOME / "bin" / "hermes.cmd"
 DEFAULT_CWD = Path.home()
+DEFAULT_DELEGATE_TOOLSETS = os.environ.get("HERMES_BRIDGE_DEFAULT_TOOLSETS", "terminal,file")
+LOG_PATH = HERMES_HOME / "logs" / "windows-hermes-proxy-mcp.jsonl"
 
 if str(HERMES_AGENT) not in sys.path:
     sys.path.insert(0, str(HERMES_AGENT))
@@ -50,6 +56,35 @@ def _child_env() -> dict[str, str]:
     return env
 
 
+def _append_diag(event: dict) -> None:
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = dict(event)
+        payload.setdefault("ts", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        with LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _hermes_command() -> tuple[list[str], str]:
+    if HERMES_EXE.exists():
+        return [str(HERMES_EXE)], "exe"
+    if HERMES_PYTHON.exists():
+        return [str(HERMES_PYTHON), "-m", "hermes_cli.main"], "python-module"
+    if HERMES_CMD.exists():
+        return [str(HERMES_CMD)], "cmd-shim"
+    path_hermes = shutil.which("hermes")
+    if path_hermes:
+        return [path_hermes], "path"
+    return ["hermes"], "missing"
+
+
+def _hermes_args(*args: str) -> tuple[list[str], str]:
+    command, mode = _hermes_command()
+    return [*command, *args], mode
+
+
 def _convert_cwd(cwd: Optional[str]) -> tuple[Optional[Path], Optional[str]]:
     if cwd is None or str(cwd).strip() == "":
         return DEFAULT_CWD, None
@@ -68,7 +103,29 @@ def _convert_cwd(cwd: Optional[str]) -> tuple[Optional[Path], Optional[str]]:
     return path, None
 
 
-def _run_hidden(args: list[str], cwd: Optional[Path], timeout_seconds: int) -> dict:
+def _normalize_toolsets(toolsets: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    if toolsets is None:
+        return DEFAULT_DELEGATE_TOOLSETS, None
+
+    value = str(toolsets).strip()
+    if not value:
+        return None, None
+
+    if value.lower() in {"default", "defaults", "config", "configured", "configured-default", "all"}:
+        return None, None
+
+    parts = [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+    if not parts:
+        return None, None
+
+    for part in parts:
+        if not all(ch.isalnum() or ch in {"-", "_"} for ch in part):
+            return None, f"invalid toolset name: {part}"
+
+    return ",".join(parts), None
+
+
+def _run_hidden(args: list[str], cwd: Optional[Path], timeout_seconds: int, operation_id: Optional[str] = None) -> dict:
     creationflags = 0
     startupinfo = None
     if os.name == "nt":
@@ -78,6 +135,14 @@ def _run_hidden(args: list[str], cwd: Optional[Path], timeout_seconds: int) -> d
         startupinfo.wShowWindow = 0
 
     started = time.monotonic()
+    if operation_id:
+        _append_diag({
+            "operation_id": operation_id,
+            "event": "process.start",
+            "cwd": str(cwd) if cwd else None,
+            "argv_head": args[:4],
+            "timeout_seconds": timeout_seconds,
+        })
     try:
         proc = subprocess.Popen(
             args,
@@ -94,7 +159,15 @@ def _run_hidden(args: list[str], cwd: Optional[Path], timeout_seconds: int) -> d
         )
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        if operation_id:
+            _append_diag({
+                "operation_id": operation_id,
+                "event": "process.start_failed",
+                "elapsed_ms": elapsed_ms,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
         return {
+            "ok": False,
             "exit_code": None,
             "timed_out": False,
             "elapsed_ms": elapsed_ms,
@@ -120,24 +193,56 @@ def _run_hidden(args: list[str], cwd: Optional[Path], timeout_seconds: int) -> d
         stdout, stderr = proc.communicate(timeout=10)
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
-    return {
+    exit_code = _windows_exit_code(proc.returncode)
+    result = {
+        "ok": exit_code == 0 and not timed_out,
         "exit_code": _windows_exit_code(proc.returncode),
         "timed_out": timed_out,
         "elapsed_ms": elapsed_ms,
         "stdout": _tail(stdout),
         "stderr_tail": _tail(stderr),
     }
+    if operation_id:
+        _append_diag({
+            "operation_id": operation_id,
+            "event": "process.finish",
+            "ok": result["ok"],
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "elapsed_ms": elapsed_ms,
+            "stderr_tail": _tail(stderr, max_chars=2000),
+        })
+    return result
 
 
 def _status_payload() -> str:
-    version = _run_hidden([str(HERMES_EXE), "--version"], cwd=HERMES_AGENT, timeout_seconds=30)
-    config_path = _run_hidden([str(HERMES_EXE), "config", "path"], cwd=HERMES_AGENT, timeout_seconds=30)
-    gateway = _run_hidden([str(HERMES_EXE), "gateway", "status"], cwd=HERMES_AGENT, timeout_seconds=60)
+    operation_id = f"status-{uuid4().hex[:12]}"
+    version_args, command_mode = _hermes_args("--version")
+    config_args, _ = _hermes_args("config", "path")
+    gateway_args, _ = _hermes_args("gateway", "status")
+    version = _run_hidden(version_args, cwd=HERMES_AGENT, timeout_seconds=30, operation_id=operation_id)
+    config_path = _run_hidden(config_args, cwd=HERMES_AGENT, timeout_seconds=30, operation_id=operation_id)
+    gateway = _run_hidden(gateway_args, cwd=HERMES_AGENT, timeout_seconds=60, operation_id=operation_id)
     return _json({
-        "hermes_exe": str(HERMES_EXE),
+        "operation_id": operation_id,
+        "hermes_command": version_args[:2] if command_mode == "python-module" else version_args[:1],
+        "hermes_command_mode": command_mode,
         "hermes_home": str(HERMES_HOME),
         "default_cwd": str(DEFAULT_CWD),
-        "delegate_runner_available": HERMES_EXE.exists(),
+        "delegate_runner_available": command_mode != "missing",
+        "default_delegate_toolsets": DEFAULT_DELEGATE_TOOLSETS,
+        "diagnostics_log": str(LOG_PATH),
+        "client_guidance": (
+            "Use the MCP client's normal tool call for bridge_agent_delegate. "
+            "Do not shell out to Python, curl, or raw HTTP clients unless you are "
+            "diagnosing a broken MCP client wrapper."
+        ),
+        "recommended_client_timeouts": {
+            "init_timeout": 30,
+            "connect_timeout": 30,
+            "tool_timeout": 900,
+            "timeout": 900,
+        },
         "version": version,
         "config_path": config_path,
         "gateway_status": gateway,
@@ -149,7 +254,9 @@ def _delegate_payload(
     cwd: Optional[str] = None,
     timeout_seconds: int = 900,
     max_turns: int = 90,
+    toolsets: Optional[str] = DEFAULT_DELEGATE_TOOLSETS,
 ) -> str:
+    operation_id = f"delegate-{uuid4().hex[:12]}"
     if not isinstance(prompt, str) or not prompt.strip():
         return _json({"error": "prompt is required"})
     try:
@@ -165,11 +272,19 @@ def _delegate_payload(
     if cwd_error:
         return _json({"error": cwd_error, "cwd": cwd})
 
-    if not HERMES_EXE.exists():
-        return _json({"error": "native Windows Hermes executable not found", "hermes_exe": str(HERMES_EXE)})
+    toolsets_arg, toolsets_error = _normalize_toolsets(toolsets)
+    if toolsets_error:
+        return _json({"error": toolsets_error, "toolsets": toolsets})
+
+    command, command_mode = _hermes_command()
+    if command_mode == "missing":
+        return _json({
+            "error": "native Windows Hermes launcher not found",
+            "checked": [str(HERMES_EXE), str(HERMES_PYTHON), str(HERMES_CMD)],
+        })
 
     args = [
-        str(HERMES_EXE),
+        *command,
         "chat",
         "--query", prompt,
         "--quiet",
@@ -177,11 +292,18 @@ def _delegate_payload(
         "--accept-hooks",
         "--max-turns", str(max_turns_i),
     ]
-    result = _run_hidden(args, cwd=run_cwd, timeout_seconds=timeout_i)
+    if toolsets_arg:
+        args.extend(["--toolsets", toolsets_arg])
+
+    result = _run_hidden(args, cwd=run_cwd, timeout_seconds=timeout_i, operation_id=operation_id)
     result.update({
+        "operation_id": operation_id,
         "cwd": str(run_cwd),
         "timeout_seconds": timeout_i,
         "max_turns": max_turns_i,
+        "toolsets": toolsets_arg or "configured-default",
+        "hermes_command_mode": command_mode,
+        "diagnostics_log": str(LOG_PATH),
     })
     return _json(result)
 
@@ -198,15 +320,19 @@ def add_windows_proxy_tools(mcp):
         cwd: Optional[str] = None,
         timeout_seconds: int = 900,
         max_turns: int = 90,
+        toolsets: Optional[str] = DEFAULT_DELEGATE_TOOLSETS,
     ) -> str:
         """Delegate a task prompt to the native bridge agent.
 
         The task runs through the upstream native agent, not a raw shell proxy.
-        The upstream agent uses its normal tool and approval policy. Use this
-        when a container-hosted MCP client needs native Windows filesystem,
-        process, desktop, credential, or host integration access.
+        The upstream agent uses its normal approval policy. By default the
+        bridge uses a focused native toolset so unrelated MCP connectors do not
+        slow or fail the delegation path. Pass toolsets="configured-default" or
+        toolsets="all" to let Windows Hermes load its configured defaults. This
+        tool is intended to be called through the client's normal MCP tool
+        interface; raw HTTP/Python callers should be used only for diagnostics.
         """
-        return _delegate_payload(prompt, cwd, timeout_seconds, max_turns)
+        return _delegate_payload(prompt, cwd, timeout_seconds, max_turns, toolsets)
 
     @mcp.tool()
     def windows_agent_status() -> str:
@@ -219,9 +345,10 @@ def add_windows_proxy_tools(mcp):
         cwd: Optional[str] = None,
         timeout_seconds: int = 900,
         max_turns: int = 90,
+        toolsets: Optional[str] = DEFAULT_DELEGATE_TOOLSETS,
     ) -> str:
         """Compatibility alias for bridge_agent_delegate."""
-        return _delegate_payload(prompt, cwd, timeout_seconds, max_turns)
+        return _delegate_payload(prompt, cwd, timeout_seconds, max_turns, toolsets)
 
 
 def main() -> None:

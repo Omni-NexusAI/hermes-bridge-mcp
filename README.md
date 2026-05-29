@@ -21,7 +21,11 @@ credential, or host integration access.
 hermes chat --query ... --quiet --source mcp-windows-proxy --accept-hooks
 ```
 
-It does not expose a raw PowerShell or CMD proxy.
+It does not expose a raw PowerShell or CMD proxy. Delegation uses the focused
+`terminal,file` Windows Hermes toolsets by default, which avoids loading every
+MCP server in the Windows Hermes config for simple proxy requests. Pass
+`toolsets: "all"` or `toolsets: "configured-default"` when a delegated task
+really needs the full configured Windows Hermes MCP surface.
 
 ## Requirements
 
@@ -70,8 +74,10 @@ mcp_servers:
   hermes-bridge:
     type: streamable-http
     url: http://host.docker.internal:18082/mcp
-    timeout: 120
+    timeout: 900
+    tool_timeout: 900
     connect_timeout: 30
+    init_timeout: 30
 ```
 
 Do not add `transport: sse` for this bridge. It uses supergateway
@@ -91,6 +97,9 @@ python scripts/configure-a0-mcp.py --settings /a0/usr/settings.json --check-heal
 The helper writes a timestamped backup next to `settings.json` before changing
 the file. The added server is named `hermes-bridge` and points at
 `http://host.docker.internal:18082/mcp` with `type` set to `streamable-http`.
+It also sets both `timeout` and `tool_timeout` to `900` seconds because
+delegated Windows Hermes calls can legitimately take longer than short MCP
+tool defaults.
 The optional health check verifies `http://host.docker.internal:18082/healthz`
 from inside the A0 container, which proves that A0 can reach the Windows bridge.
 Restart A0 after running the helper so the MCP client and settings UI reload the
@@ -119,7 +128,10 @@ bridge_agent_status
 bridge_agent_delegate
 ```
 
-You can also test the proxy directly:
+MCP clients should normally call `bridge_agent_status` and
+`bridge_agent_delegate` through their built-in MCP tool interface. The direct
+Python client below is only a low-level diagnostic for proving the HTTP MCP
+endpoint itself works when a client wrapper is suspected to be broken:
 
 ```python
 import asyncio
@@ -134,6 +146,7 @@ async def main():
                 "prompt": "Reply exactly WINDOWS_PROXY_OK and do not use tools.",
                 "timeout_seconds": 180,
                 "max_turns": 10,
+                "toolsets": "terminal,file",
             })
             print(result.content[0].text)
 
@@ -158,6 +171,11 @@ asyncio.run(main())
 - The bridge endpoint remains
   `host.docker.internal:18082/mcp`.
 - Delegated tasks use Windows Hermes normal approval policy.
+- The bridge writes lightweight JSONL diagnostics to
+  `%LOCALAPPDATA%\hermes\logs\windows-hermes-proxy-mcp.jsonl`. Each delegate
+  result includes an `operation_id` that can be matched to that log.
+- To change the default delegate toolsets for all calls, set
+  `HERMES_BRIDGE_DEFAULT_TOOLSETS` before starting the bridge.
 
 ## Repository Workflow Guards
 
