@@ -74,6 +74,10 @@ python scripts/configure-a0-mcp.py --settings /a0/usr/settings.json
 The helper writes a timestamped backup next to `settings.json` before changing
 the file. The added server is named `hermes-bridge` and points at
 `http://host.docker.internal:18082/mcp` with `type` set to `streamable-http`.
+Restart A0 after running the helper so the MCP client and settings UI reload the
+entry. Then verify it appears under **Settings > MCP/A2A > External MCP Servers
+> Open** as `hermes-bridge` in the editable JSON and as `hermes_bridge` with
+tools in the server status list.
 
 To preview the change:
 

@@ -74,6 +74,7 @@ def main() -> int:
             "dry_run": True,
             "server_count": len(servers),
             "entry": servers.get(args.name),
+            "restart_a0_required": True,
         }, indent=2, ensure_ascii=False))
         return 0
 
@@ -90,6 +91,8 @@ def main() -> int:
         "server": args.name,
         "url": args.url,
         "changed": changed,
+        "restart_a0_required": True,
+        "verify_in_ui": "Settings > MCP/A2A > External MCP Servers > Open; look for hermes-bridge in the JSON and hermes_bridge in server status.",
     }, indent=2, ensure_ascii=False))
     return 0
 
