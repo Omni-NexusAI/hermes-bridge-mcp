@@ -135,3 +135,11 @@ asyncio.run(main())
 - The bridge endpoint remains
   `host.docker.internal:18082/mcp`.
 - Delegated tasks use Windows Hermes normal approval policy.
+
+## Repository Workflow Guards
+
+- Use pull requests for changes to `main`.
+- Do not push directly to `main`.
+- Do not merge bridge changes without explicit owner approval.
+- Keep validation work on PR branches until the target agent setup confirms the
+  bridge can connect and call `bridge_agent_status` or `bridge_agent_delegate`.
