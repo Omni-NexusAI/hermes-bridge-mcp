@@ -1,0 +1,16 @@
+{
+  "peers": [
+    {
+      "peer_id": "quest3",
+      "url": "http://QUEST_LAN_IP:18084/mcp",
+      "platform": "android",
+      "token_env": "HERMES_BRIDGE_PEER_QUEST3_TOKEN"
+    },
+    {
+      "peer_id": "windows",
+      "url": "http://WINDOWS_LAN_IP:18084/mcp",
+      "platform": "windows",
+      "token_env": "HERMES_BRIDGE_PEER_WINDOWS_TOKEN"
+    }
+  ]
+}

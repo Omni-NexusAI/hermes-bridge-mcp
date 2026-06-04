@@ -1,0 +1,79 @@
+# Android / Quest Hermes Peer Bridge Setup
+
+This setup is for Android-compatible Hermes peers, with Quest 3 as the first
+test device. It runs the bridge directly with the Python MCP SDK and does not
+require Node.js or `supergateway`.
+
+## Install
+
+```sh
+pkg install python git
+git clone https://github.com/Omni-NexusAI/hermes-bridge-mcp.git
+cd hermes-bridge-mcp
+git checkout codex/over-network-a2a-android-support
+python -m pip install -r requirements-android.txt
+```
+
+## Configure
+
+```sh
+mkdir -p ~/.hermes/bridge-state
+cp config/android-peer.env.example config/android-peer.env
+cp config/peers.example.json ~/.hermes/bridge-state/peers.json
+```
+
+Edit `config/android-peer.env` and `~/.hermes/bridge-state/peers.json`:
+
+- set `HERMES_BRIDGE_AUTH_TOKEN` to the token Windows will use when calling
+  Android
+- set `HERMES_BRIDGE_PEER_WINDOWS_TOKEN` to the token Android will use when
+  calling Windows
+- replace `WINDOWS_LAN_IP` with the Windows machine LAN IP
+- replace `QUEST_LAN_IP` with the Quest LAN IP when copying the config back to
+  Windows
+
+## Run
+
+```sh
+sh bin/start-android-hermes-peer-bridge.sh
+```
+
+The Android peer bridge listens on:
+
+```text
+http://QUEST_LAN_IP:18084/mcp
+```
+
+## First Smoke Tests
+
+From Windows Hermes, call:
+
+```text
+bridge_peer_status(peer_id="quest3")
+```
+
+Then start a remote task:
+
+```text
+bridge_peer_delegate_start(
+  peer_id="quest3",
+  prompt="Reply exactly QUEST_PEER_OK.",
+  conversation_key="first-bidirectional-smoke"
+)
+```
+
+From Quest Hermes, call the reverse direction:
+
+```text
+bridge_peer_status(peer_id="windows")
+```
+
+Then:
+
+```text
+bridge_peer_delegate_start(
+  peer_id="windows",
+  prompt="Reply exactly WINDOWS_PEER_OK.",
+  conversation_key="first-bidirectional-smoke"
+)
+```

@@ -11,6 +11,8 @@ $binFiles = @(
     "windows-hermes-proxy-mcp.py",
     "windows-hermes-mcp-serve.cmd",
     "start-windows-hermes-bridge.ps1",
+    "start-windows-hermes-bridge-staging.ps1",
+    "start-windows-hermes-peer-bridge.ps1",
     "windows-hermes-bridge-background-watchdog.ps1",
     "start-windows-hermes-gateway.ps1",
     "windows-hermes-gateway-background-watchdog.ps1"
@@ -48,6 +50,8 @@ if (Get-Command supergateway.cmd -ErrorAction SilentlyContinue) {
 Write-Host ""
 Write-Host "Docker Hermes config:"
 Write-Host "  windows-hermes -> http://host.docker.internal:18082/mcp"
+Write-Host "  windows-hermes-staging -> http://host.docker.internal:18083/mcp"
+Write-Host "  hermes-peer native HTTP -> http://<LAN-IP>:18084/mcp"
 Write-Host ""
 Write-Host "Verify from Docker Hermes:"
 Write-Host "  hermes mcp test windows-hermes"

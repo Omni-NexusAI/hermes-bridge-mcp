@@ -1,13 +1,12 @@
 $ErrorActionPreference = "Stop"
 
-$HermesExe = "$env:LOCALAPPDATA\hermes\hermes-agent\venv\Scripts\hermes.exe"
 $HermesHome = "$env:LOCALAPPDATA\hermes"
 $BridgeCmd = Join-Path $HermesHome "bin\windows-hermes-mcp-serve.cmd"
 $LogDir = Join-Path $HermesHome "logs"
-$LogPath = Join-Path $LogDir "windows-bridge-supergateway.log"
-$ErrPath = Join-Path $LogDir "windows-bridge-supergateway.err.log"
-$PidPath = Join-Path $HermesHome "windows-bridge-supergateway.pid"
-$Port = 18082
+$LogPath = Join-Path $LogDir "windows-bridge-supergateway-staging.log"
+$ErrPath = Join-Path $LogDir "windows-bridge-supergateway-staging.err.log"
+$PidPath = Join-Path $HermesHome "windows-bridge-supergateway-staging.pid"
+$Port = 18083
 
 function Test-PortOpen {
     param([int]$PortToCheck)
@@ -36,7 +35,7 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 if ((-not (Test-Path $PidPath)) -and (Test-PortOpen -PortToCheck $Port)) {
     $existingPid = Get-ListenerPid -PortToCheck $Port
     if ($existingPid) { $existingPid | Set-Content -Path $PidPath -NoNewline }
-    Write-Output "OK: existing bridge is already listening on port $Port"
+    Write-Output "OK: existing staging bridge is already listening on port $Port"
     return
 }
 
@@ -76,10 +75,9 @@ $process.Id | Set-Content -Path $PidPath -NoNewline
 Start-Sleep -Seconds 3
 
 if (Test-PortOpen -PortToCheck $Port) {
-    Write-Output "OK: supergateway PID=$($process.Id) listening on port $Port"
+    Write-Output "OK: staging supergateway PID=$($process.Id) listening on port $Port"
 } else {
-    Write-Output "WARN: supergateway PID=$($process.Id) started but port $Port is not reachable"
+    Write-Output "WARN: staging supergateway PID=$($process.Id) started but port $Port is not reachable"
     Write-Output "--- stderr (last 20 lines) ---"
     Get-Content $ErrPath -Tail 20 -ErrorAction SilentlyContinue
 }
-
