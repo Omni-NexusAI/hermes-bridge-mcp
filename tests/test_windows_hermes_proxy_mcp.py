@@ -142,6 +142,18 @@ def test_peer_config_loads_static_peers_and_token_env(tmp_path, monkeypatch):
     assert peers["quest3"]["token"] == "secret"
 
 
+def test_peer_config_candidates_include_android_shared_storage(tmp_path):
+    module = load_proxy_module()
+    primary = tmp_path / "peers.json"
+
+    assert module._peer_config_candidates(primary)[0] == primary
+
+    candidates = [candidate.as_posix() for candidate in module._peer_config_candidates(primary, os_name="posix")]
+
+    assert "/sdcard/Download/hermes-q3-peers.json" in candidates
+    assert "/storage/self/primary/Download/hermes-q3-peers.json" in candidates
+
+
 def test_lan_peer_http_requires_token():
     module = load_proxy_module()
 

@@ -59,6 +59,10 @@ BRIDGE_STATE_FILE = Path(
     )
 ).expanduser()
 PEER_CONFIG_FILE = Path(os.environ.get("HERMES_BRIDGE_PEERS_CONFIG", str(BRIDGE_STATE_DIR / "peers.json"))).expanduser()
+ANDROID_SHARED_PEER_CONFIG_FILES = (
+    Path("/sdcard/Download/hermes-q3-peers.json"),
+    Path("/storage/self/primary/Download/hermes-q3-peers.json"),
+)
 LOCAL_PEER_ID = os.environ.get("HERMES_BRIDGE_PEER_ID") or f"{platform.node() or 'hermes'}-{platform.system().lower() or 'peer'}"
 TASK_RETENTION_SECONDS = 24 * 60 * 60
 SESSION_ID_RE = re.compile(r"session_id:\s*([A-Za-z0-9_.:-]+)", re.IGNORECASE)
@@ -448,13 +452,24 @@ def _task_status(task_id: str) -> Optional[dict]:
     return dict(saved) if isinstance(saved, dict) else None
 
 
-def _load_peer_config(path: Optional[Path] = None) -> dict[str, dict[str, Any]]:
-    config_path = path or PEER_CONFIG_FILE
+def _peer_config_candidates(path: Optional[Path] = None, os_name: Optional[str] = None) -> list[Path]:
+    candidates = [Path(path).expanduser()] if path else [PEER_CONFIG_FILE]
+    if (os_name or os.name) != "nt":
+        candidates.extend(ANDROID_SHARED_PEER_CONFIG_FILES)
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            unique.append(candidate)
+            seen.add(key)
+    return unique
+
+
+def _parse_peer_config(config_path: Path) -> dict[str, dict[str, Any]]:
     try:
         raw = config_path.read_text(encoding="utf-8")
         data = json.loads(raw)
-    except FileNotFoundError:
-        return {}
     except Exception as exc:
         raise ValueError(f"failed to load peer config {config_path}: {exc}") from exc
 
@@ -493,6 +508,14 @@ def _load_peer_config(path: Optional[Path] = None) -> dict[str, dict[str, Any]]:
     return peers
 
 
+def _load_peer_config(path: Optional[Path] = None) -> dict[str, dict[str, Any]]:
+    for config_path in _peer_config_candidates(path):
+        if not config_path.exists():
+            continue
+        return _parse_peer_config(config_path)
+    return {}
+
+
 def _get_peer(peer_id: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     if not isinstance(peer_id, str) or not peer_id.strip():
         return None, "peer_id is required"
@@ -504,7 +527,7 @@ def _get_peer(peer_id: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     if not peer:
         return None, f"peer not found: {peer_id}"
     if not peer.get("token"):
-        return None, f"peer token is missing for {peer_id}; set token_env or token in {PEER_CONFIG_FILE}"
+        return None, f"peer token is missing for {peer_id}; set token_env or token in one of {_peer_config_candidates()}"
     return peer, None
 
 
@@ -612,6 +635,7 @@ def add_windows_proxy_tools(mcp):
             "hermes_agent": str(HERMES_AGENT),
             "bridge_state_file": str(BRIDGE_STATE_FILE),
             "peer_config_file": str(PEER_CONFIG_FILE),
+            "peer_config_candidates": [str(candidate) for candidate in _peer_config_candidates()],
             "local_peer_id": LOCAL_PEER_ID,
             "configured_peers": _configured_peer_ids(),
             "platform": platform.system().lower() or "unknown",
