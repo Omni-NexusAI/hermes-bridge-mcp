@@ -45,7 +45,7 @@ Peer mode runs the same MCP server directly over Streamable HTTP and does not
 require `supergateway`:
 
 ```powershell
-$env:HERMES_BRIDGE_AUTH_TOKEN = "shared-secret-for-inbound-calls"
+$env:HERMES_BRIDGE_PAIR_KEY = "same-secret-on-each-paired-agent"
 powershell -ExecutionPolicy Bypass -File $env:LOCALAPPDATA\hermes\bin\start-windows-hermes-peer-bridge.ps1
 ```
 
@@ -70,7 +70,7 @@ Static peer config lives at
       "peer_id": "quest3",
       "url": "http://QUEST_LAN_IP:18084/mcp",
       "platform": "android",
-      "token_env": "HERMES_BRIDGE_PEER_QUEST3_TOKEN"
+      "pair_key_env": "HERMES_BRIDGE_PAIR_KEY"
     }
   ]
 }
@@ -84,9 +84,11 @@ Peer tools:
 - `bridge_peer_delegate_result(peer_id, task_id)`
 - `bridge_peer_delegate_cancel(peer_id, task_id)`
 
-LAN-facing peer bridge startup requires `HERMES_BRIDGE_AUTH_TOKEN` unless
-explicitly run with the unsafe development override. Peer client calls read the
-remote token from `token_env` in the peer config.
+LAN-facing peer bridge startup requires `HERMES_BRIDGE_PAIR_KEY` unless
+explicitly run with the unsafe development override. Both paired agents should
+use the same pair key for the simplest setup. For multi-peer setups, each peer
+entry can use a distinct `pair_key_env`. Legacy `HERMES_BRIDGE_AUTH_TOKEN`,
+`token`, and `token_env` values are still accepted for existing installs.
 
 ## Requirements
 

@@ -10,8 +10,8 @@ $PidPath = Join-Path $HermesHome "windows-peer-bridge.pid"
 $Port = if ($env:HERMES_BRIDGE_PORT) { [int]$env:HERMES_BRIDGE_PORT } else { 18084 }
 $HostAddress = if ($env:HERMES_BRIDGE_HOST) { $env:HERMES_BRIDGE_HOST } else { "0.0.0.0" }
 
-if (-not $env:HERMES_BRIDGE_AUTH_TOKEN) {
-    throw "HERMES_BRIDGE_AUTH_TOKEN is required for LAN-facing peer bridge"
+if (-not $env:HERMES_BRIDGE_PAIR_KEY -and -not $env:HERMES_BRIDGE_AUTH_TOKEN) {
+    throw "HERMES_BRIDGE_PAIR_KEY is required for LAN-facing peer bridge. HERMES_BRIDGE_AUTH_TOKEN is still accepted for legacy configs."
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null

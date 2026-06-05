@@ -83,11 +83,13 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 
 class _SharedTokenVerifier(TokenVerifier):
-    def __init__(self, token: str):
-        self._token = token
+    def __init__(self, tokens: str | list[str]):
+        if isinstance(tokens, str):
+            tokens = [tokens]
+        self._tokens = {token for token in tokens if token}
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        if token != self._token:
+        if token not in self._tokens:
             return None
         return AccessToken(token=token, client_id="hermes-peer", scopes=["hermes-bridge"])
 
@@ -111,6 +113,29 @@ def _tail(text: str, max_chars: int = 8000) -> str:
 
 def _now() -> float:
     return time.time()
+
+
+def _env_value(name: Any) -> Optional[str]:
+    if not name:
+        return None
+    value = os.environ.get(str(name))
+    return value if value else None
+
+
+def _configured_pair_key() -> Optional[str]:
+    return _env_value("HERMES_BRIDGE_PAIR_KEY")
+
+
+def _configured_auth_token() -> Optional[str]:
+    return _env_value("HERMES_BRIDGE_AUTH_TOKEN") or _configured_pair_key()
+
+
+def _auth_tokens(auth_token: Optional[str] = None) -> list[str]:
+    tokens: list[str] = []
+    for token in (auth_token, _configured_pair_key()):
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens
 
 
 def _load_state() -> dict:
@@ -494,15 +519,21 @@ def _parse_peer_config(config_path: Path) -> dict[str, dict[str, Any]]:
         url = str(item.get("url") or "").strip()
         if not peer_id or not url:
             continue
-        token = item.get("token")
+        token = item.get("pair_key") or item.get("token")
+        pair_key_env = item.get("pair_key_env")
         token_env = item.get("token_env")
+        if pair_key_env and not token:
+            token = _env_value(pair_key_env)
         if token_env and not token:
-            token = os.environ.get(str(token_env))
+            token = _env_value(token_env)
+        if not token:
+            token = _configured_pair_key()
         peers[peer_id] = {
             "peer_id": peer_id,
             "url": url,
             "platform": str(item.get("platform") or "unknown"),
             "token": token,
+            "pair_key_env": pair_key_env,
             "token_env": token_env,
         }
     return peers
@@ -527,7 +558,7 @@ def _get_peer(peer_id: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     if not peer:
         return None, f"peer not found: {peer_id}"
     if not peer.get("token"):
-        return None, f"peer token is missing for {peer_id}; set token_env or token in one of {_peer_config_candidates()}"
+        return None, f"peer pair key is missing for {peer_id}; set pair_key_env, token_env, token, or HERMES_BRIDGE_PAIR_KEY"
     return peer, None
 
 
@@ -638,6 +669,8 @@ def add_windows_proxy_tools(mcp):
             "peer_config_candidates": [str(candidate) for candidate in _peer_config_candidates()],
             "local_peer_id": LOCAL_PEER_ID,
             "configured_peers": _configured_peer_ids(),
+            "pair_key_configured": bool(_configured_pair_key()),
+            "legacy_auth_token_configured": bool(_env_value("HERMES_BRIDGE_AUTH_TOKEN")),
             "platform": platform.system().lower() or "unknown",
             "default_cwd": str(DEFAULT_CWD),
             "delegate_runner_available": _delegate_runner_available(),
@@ -859,11 +892,11 @@ def _is_loopback_host(host: str) -> bool:
 def _validate_http_auth(host: str, auth_token: Optional[str], allow_unsafe_lan: bool) -> Optional[str]:
     if _is_loopback_host(host):
         return None
-    if auth_token:
+    if _auth_tokens(auth_token):
         return None
     if allow_unsafe_lan:
         return None
-    return "LAN-facing peer bridge requires HERMES_BRIDGE_AUTH_TOKEN or --auth-token"
+    return "LAN-facing peer bridge requires HERMES_BRIDGE_PAIR_KEY, HERMES_BRIDGE_AUTH_TOKEN, or --auth-token"
 
 
 def _create_delegate_only_server(
@@ -871,9 +904,10 @@ def _create_delegate_only_server(
     port: int = 8000,
     auth_token: Optional[str] = None,
 ) -> "FastMCP":
-    token_verifier = _SharedTokenVerifier(auth_token) if auth_token else None
+    tokens = _auth_tokens(auth_token)
+    token_verifier = _SharedTokenVerifier(tokens) if tokens else None
     auth = None
-    if auth_token:
+    if tokens:
         resource_url = f"http://localhost:{port}"
         auth = AuthSettings(issuer_url=resource_url, resource_server_url=resource_url, required_scopes=["hermes-bridge"])
     return FastMCP(
@@ -899,7 +933,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default=os.environ.get("HERMES_BRIDGE_TRANSPORT", "stdio"))
     parser.add_argument("--host", default=os.environ.get("HERMES_BRIDGE_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("HERMES_BRIDGE_PORT", "8000")))
-    parser.add_argument("--auth-token", default=os.environ.get("HERMES_BRIDGE_AUTH_TOKEN"))
+    parser.add_argument("--auth-token", default=_configured_auth_token())
     parser.add_argument("--allow-unsafe-lan", action="store_true", default=os.environ.get("HERMES_BRIDGE_ALLOW_UNSAFE_LAN") == "1")
     return parser
 

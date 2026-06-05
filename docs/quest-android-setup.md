@@ -24,13 +24,14 @@ cp config/peers.example.json ~/.hermes/bridge-state/peers.json
 
 Edit `config/android-peer.env` and `~/.hermes/bridge-state/peers.json`:
 
-- set `HERMES_BRIDGE_AUTH_TOKEN` to the token Windows will use when calling
-  Android
-- set `HERMES_BRIDGE_PEER_WINDOWS_TOKEN` to the token Android will use when
-  calling Windows
+- set `HERMES_BRIDGE_PAIR_KEY` to the same strong secret on Windows and Android
 - replace `WINDOWS_LAN_IP` with the Windows machine LAN IP
 - replace `QUEST_LAN_IP` with the Quest LAN IP when copying the config back to
   Windows
+
+For more than one paired agent, keep multiple peer records in `peers.json`.
+Each record can use the shared `HERMES_BRIDGE_PAIR_KEY`, or a distinct
+`pair_key_env` if you want separate secrets per peer later.
 
 ## Run
 

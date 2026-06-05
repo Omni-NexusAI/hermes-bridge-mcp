@@ -142,6 +142,79 @@ def test_peer_config_loads_static_peers_and_token_env(tmp_path, monkeypatch):
     assert peers["quest3"]["token"] == "secret"
 
 
+def test_peer_config_prefers_pair_key_env(tmp_path, monkeypatch):
+    module = load_proxy_module()
+    config = tmp_path / "peers.json"
+    config.write_text(
+        """
+        {
+          "peers": [
+            {
+              "peer_id": "quest3",
+              "url": "http://10.0.0.42:18084/mcp",
+              "platform": "android",
+              "pair_key_env": "HERMES_PAIR_QUEST3",
+              "token_env": "OLD_QUEST_TOKEN"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_PAIR_QUEST3", "pair-secret")
+    monkeypatch.setenv("OLD_QUEST_TOKEN", "legacy-secret")
+
+    peers = module._load_peer_config(config)
+
+    assert peers["quest3"]["token"] == "pair-secret"
+    assert peers["quest3"]["pair_key_env"] == "HERMES_PAIR_QUEST3"
+
+
+def test_peer_config_uses_default_pair_key_for_multiple_peers(tmp_path, monkeypatch):
+    module = load_proxy_module()
+    config = tmp_path / "peers.json"
+    config.write_text(
+        """
+        {
+          "peers": [
+            {"peer_id": "quest3", "url": "http://10.0.0.42:18084/mcp"},
+            {"peer_id": "laptop", "url": "http://10.0.0.43:18084/mcp"}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_BRIDGE_PAIR_KEY", "shared-pair-secret")
+
+    peers = module._load_peer_config(config)
+
+    assert peers["quest3"]["token"] == "shared-pair-secret"
+    assert peers["laptop"]["token"] == "shared-pair-secret"
+
+
+def test_peer_config_supports_distinct_per_peer_pair_keys(tmp_path, monkeypatch):
+    module = load_proxy_module()
+    config = tmp_path / "peers.json"
+    config.write_text(
+        """
+        {
+          "peers": [
+            {"peer_id": "quest3", "url": "http://10.0.0.42:18084/mcp", "pair_key_env": "PAIR_QUEST"},
+            {"peer_id": "laptop", "url": "http://10.0.0.43:18084/mcp", "pair_key_env": "PAIR_LAPTOP"}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PAIR_QUEST", "quest-secret")
+    monkeypatch.setenv("PAIR_LAPTOP", "laptop-secret")
+
+    peers = module._load_peer_config(config)
+
+    assert peers["quest3"]["token"] == "quest-secret"
+    assert peers["laptop"]["token"] == "laptop-secret"
+
+
 def test_peer_config_candidates_include_android_shared_storage(tmp_path):
     module = load_proxy_module()
     primary = tmp_path / "peers.json"
@@ -162,19 +235,28 @@ def test_lan_peer_http_requires_token():
     assert module._validate_http_auth("127.0.0.1", None, False) is None
 
 
-def test_shared_token_verifier_accepts_only_configured_token():
+def test_lan_peer_http_accepts_pair_key(monkeypatch):
     module = load_proxy_module()
-    verifier = module._SharedTokenVerifier("secret")
+    monkeypatch.setenv("HERMES_BRIDGE_PAIR_KEY", "pair-secret")
+
+    assert module._validate_http_auth("0.0.0.0", None, False) is None
+
+
+def test_shared_token_verifier_accepts_only_configured_tokens():
+    module = load_proxy_module()
+    verifier = module._SharedTokenVerifier(["legacy-secret", "pair-secret"])
 
     async def check():
-        accepted = await verifier.verify_token("secret")
+        accepted_legacy = await verifier.verify_token("legacy-secret")
+        accepted_pair = await verifier.verify_token("pair-secret")
         rejected = await verifier.verify_token("wrong")
-        return accepted, rejected
+        return accepted_legacy, accepted_pair, rejected
 
-    accepted, rejected = asyncio.run(check())
+    accepted_legacy, accepted_pair, rejected = asyncio.run(check())
 
-    assert accepted is not None
-    assert accepted.client_id == "hermes-peer"
+    assert accepted_legacy is not None
+    assert accepted_pair is not None
+    assert accepted_pair.client_id == "hermes-peer"
     assert rejected is None
 
 

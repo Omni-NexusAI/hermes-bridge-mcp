@@ -15,8 +15,8 @@ export HERMES_BRIDGE_HOST="${HERMES_BRIDGE_HOST:-0.0.0.0}"
 export HERMES_BRIDGE_PORT="${HERMES_BRIDGE_PORT:-18084}"
 export HERMES_BRIDGE_PEERS_CONFIG="${HERMES_BRIDGE_PEERS_CONFIG:-$HOME/.hermes/bridge-state/peers.json}"
 
-if [ -z "${HERMES_BRIDGE_AUTH_TOKEN:-}" ]; then
-  echo "HERMES_BRIDGE_AUTH_TOKEN is required for LAN-facing Android peer bridge" >&2
+if [ -z "${HERMES_BRIDGE_PAIR_KEY:-}" ] && [ -z "${HERMES_BRIDGE_AUTH_TOKEN:-}" ]; then
+  echo "HERMES_BRIDGE_PAIR_KEY is required for LAN-facing Android peer bridge. HERMES_BRIDGE_AUTH_TOKEN is still accepted for legacy configs." >&2
   exit 2
 fi
 
