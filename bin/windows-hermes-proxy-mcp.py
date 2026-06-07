@@ -65,6 +65,28 @@ ANDROID_SHARED_PEER_CONFIG_FILES = (
 )
 LOCAL_PEER_ID = os.environ.get("HERMES_BRIDGE_PEER_ID") or f"{platform.node() or 'hermes'}-{platform.system().lower() or 'peer'}"
 TASK_RETENTION_SECONDS = 24 * 60 * 60
+DEFAULT_INLINE_WAIT_SECONDS = 30
+DEFAULT_HARD_TIMEOUT_SECONDS = 6 * 3600
+MAX_HARD_TIMEOUT_SECONDS = 24 * 3600
+LONG_TASK_KEYWORDS = (
+    "long",
+    "extended",
+    "deep",
+    "research",
+    "investigate",
+    "implement",
+    "build",
+    "refactor",
+    "test",
+    "debug",
+    "analyze",
+    "review",
+    "optimize",
+    "migrate",
+    "generate",
+    "crawl",
+    "batch",
+)
 SESSION_ID_RE = re.compile(r"session_id:\s*([A-Za-z0-9_.:-]+)", re.IGNORECASE)
 
 _STATE_LOCK = threading.RLock()
@@ -170,7 +192,7 @@ def _prune_old_tasks(data: dict) -> None:
 
 
 def _public_task_record(record: dict) -> dict:
-    public = dict(record)
+    public = _enrich_task_record(dict(record))
     public.pop("args", None)
     public.pop("prompt", None)
     public.pop("cwd_path", None)
@@ -222,6 +244,76 @@ def _coerce_int_value(value: Any, name: str, default: int, minimum: int, maximum
     except Exception:
         return None, f"{name} must be an integer"
     return max(minimum, min(coerced, maximum)), None
+
+
+def _estimate_task_shape(prompt: str, max_turns: int, requested_wait_seconds: int) -> dict[str, int | bool]:
+    prompt_text = str(prompt or "")
+    lowered = prompt_text.lower()
+    keyword_hits = sum(1 for keyword in LONG_TASK_KEYWORDS if keyword in lowered)
+    long_prompt = len(prompt_text) >= 1200
+    many_turns = max_turns >= 45
+    likely_long = bool(keyword_hits or long_prompt or many_turns or requested_wait_seconds >= 300)
+
+    if likely_long:
+        recommended_poll = 15 if max_turns < 90 else 30
+        estimated_remaining = max(300, min(MAX_HARD_TIMEOUT_SECONDS, max_turns * 90 + len(prompt_text) // 8))
+        hard_timeout = max(DEFAULT_HARD_TIMEOUT_SECONDS, estimated_remaining + 900, requested_wait_seconds * 6)
+    else:
+        recommended_poll = 5
+        estimated_remaining = max(60, min(1800, max_turns * 45 + len(prompt_text) // 12))
+        hard_timeout = max(1800, estimated_remaining + 300, requested_wait_seconds * 4)
+
+    return {
+        "likely_long": likely_long,
+        "recommended_poll_seconds": recommended_poll,
+        "estimated_remaining_seconds": min(MAX_HARD_TIMEOUT_SECONDS, int(estimated_remaining)),
+        "hard_timeout_seconds": min(MAX_HARD_TIMEOUT_SECONDS, int(hard_timeout)),
+    }
+
+
+def _resolve_hard_timeout_seconds(prepared: dict, wait_timeout_seconds: int, hard_timeout_seconds: Optional[Any] = None) -> tuple[Optional[int], Optional[str]]:
+    if hard_timeout_seconds is not None and str(hard_timeout_seconds).strip() != "":
+        return _coerce_int_value(hard_timeout_seconds, "hard_timeout_seconds", DEFAULT_HARD_TIMEOUT_SECONDS, 1, MAX_HARD_TIMEOUT_SECONDS)
+    shape = _estimate_task_shape(prepared["prompt"], int(prepared["max_turns"] or 90), int(wait_timeout_seconds or DEFAULT_INLINE_WAIT_SECONDS))
+    return int(shape["hard_timeout_seconds"]), None
+
+
+def _status_tool_for_peer(peer_id: Optional[str]) -> str:
+    return "bridge_peer_delegate_status" if peer_id else "bridge_agent_delegate_status"
+
+
+def _result_tool_for_peer(peer_id: Optional[str]) -> str:
+    return "bridge_peer_delegate_result" if peer_id else "bridge_agent_delegate_result"
+
+
+def _next_action(status: str, peer_id: Optional[str], task_id: Optional[str]) -> str:
+    if status in {"completed", "failed", "timed_out", "canceled"}:
+        return f"Call {_result_tool_for_peer(peer_id)} with task_id {task_id} to retrieve the final delegated result."
+    return f"Poll {_status_tool_for_peer(peer_id)} with task_id {task_id}; use {_result_tool_for_peer(peer_id)} when the task is terminal."
+
+
+def _enrich_task_record(record: dict) -> dict:
+    now = _now()
+    status = str(record.get("status") or "unknown")
+    started_at = float(record.get("started_at") or now)
+    hard_deadline = record.get("hard_deadline_at")
+    remaining: Optional[int] = None
+    if hard_deadline and status not in {"completed", "failed", "timed_out", "canceled"}:
+        remaining = max(0, int(float(hard_deadline) - now))
+    elapsed_seconds = max(0, int(now - started_at))
+    estimated = record.get("estimated_remaining_seconds")
+    if estimated is not None and status not in {"completed", "failed", "timed_out", "canceled"}:
+        estimated = max(0, int(estimated) - elapsed_seconds)
+
+    record["updated_at"] = record.get("updated_at") or record.get("started_at") or now
+    record["last_checked_at"] = now
+    record["remaining_timeout_seconds"] = remaining
+    record["estimated_remaining_seconds"] = estimated
+    record["poll_after_seconds"] = record.get("poll_after_seconds") or record.get("recommended_poll_seconds") or 5
+    record["status_tool"] = _status_tool_for_peer(record.get("peer_id"))
+    record["result_tool"] = _result_tool_for_peer(record.get("peer_id"))
+    record["next_action"] = _next_action(status, record.get("peer_id"), record.get("task_id"))
+    return record
 
 
 def _extract_session_id(stdout: str, stderr: str) -> Optional[str]:
@@ -390,7 +482,7 @@ def _prepare_delegate(
     }, None
 
 
-def _complete_task(task_id: str, proc: subprocess.Popen, timeout_seconds: int) -> None:
+def _complete_task(task_id: str, proc: subprocess.Popen, hard_timeout_seconds: int) -> None:
     with _STATE_LOCK:
         record = _TASKS.get(task_id)
     if not record:
@@ -398,7 +490,7 @@ def _complete_task(task_id: str, proc: subprocess.Popen, timeout_seconds: int) -
 
     timed_out = False
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        stdout, stderr = proc.communicate(timeout=hard_timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
         _terminate_process_tree(proc)
@@ -420,8 +512,10 @@ def _complete_task(task_id: str, proc: subprocess.Popen, timeout_seconds: int) -
             "timed_out": timed_out,
             "elapsed_ms": int((finished - float(current["started_at"])) * 1000),
             "finished_at": finished,
+            "updated_at": finished,
             "stdout": _tail(stdout or ""),
             "stderr_tail": _tail(stderr or ""),
+            "last_output_at": finished if (stdout or stderr) else current.get("last_output_at"),
             "session_id": session_id or current.get("resumed_session_id"),
         })
         _TASKS[task_id] = current
@@ -430,23 +524,37 @@ def _complete_task(task_id: str, proc: subprocess.Popen, timeout_seconds: int) -
     _persist_task(public)
 
 
-def _start_delegate_task(prepared: dict, timeout_seconds: int) -> dict:
+def _start_delegate_task(prepared: dict, hard_timeout_seconds: int, wait_timeout_seconds: Optional[int] = None) -> dict:
     task_id = uuid.uuid4().hex
     proc = _start_hidden(prepared["args"], prepared["cwd"])
+    started_at = _now()
+    hard_timeout_i = max(1, min(int(hard_timeout_seconds), MAX_HARD_TIMEOUT_SECONDS))
+    wait_timeout_i = int(wait_timeout_seconds or 0)
+    task_shape = _estimate_task_shape(prepared["prompt"], int(prepared["max_turns"] or 90), wait_timeout_i or DEFAULT_INLINE_WAIT_SECONDS)
     record = {
         "task_id": task_id,
         "status": "running",
         "pid": proc.pid,
-        "started_at": _now(),
+        "started_at": started_at,
+        "updated_at": started_at,
+        "last_checked_at": None,
         "finished_at": None,
         "elapsed_ms": 0,
         "exit_code": None,
         "timed_out": False,
         "stdout": "",
         "stderr_tail": "",
+        "last_output_at": None,
         "cwd": str(prepared["cwd"]),
         "cwd_path": prepared["cwd"],
-        "timeout_seconds": timeout_seconds,
+        "timeout_seconds": wait_timeout_i or hard_timeout_i,
+        "wait_timeout_seconds": wait_timeout_i or None,
+        "hard_timeout_seconds": hard_timeout_i,
+        "hard_deadline_at": started_at + hard_timeout_i,
+        "recommended_poll_seconds": task_shape["recommended_poll_seconds"],
+        "poll_after_seconds": task_shape["recommended_poll_seconds"],
+        "estimated_remaining_seconds": task_shape["estimated_remaining_seconds"],
+        "likely_long_task": task_shape["likely_long"],
         "max_turns": prepared["max_turns"],
         "a0_thread_key": prepared["a0_thread_key"],
         "resumed_session_id": prepared.get("resumed_session_id"),
@@ -458,7 +566,7 @@ def _start_delegate_task(prepared: dict, timeout_seconds: int) -> dict:
         _TASKS[task_id] = record
         _PROCS[task_id] = proc
     _persist_task(record)
-    thread = threading.Thread(target=_complete_task, args=(task_id, proc, timeout_seconds), daemon=True)
+    thread = threading.Thread(target=_complete_task, args=(task_id, proc, hard_timeout_i), daemon=True)
     thread.start()
     return _public_task_record(record)
 
@@ -471,10 +579,11 @@ def _task_status(task_id: str) -> Optional[dict]:
         public = _public_task_record(record)
         if proc and proc.poll() is None:
             public["elapsed_ms"] = int((_now() - float(record["started_at"])) * 1000)
+            public = _enrich_task_record(public)
         return public
     data = _load_state()
     saved = data.get("tasks", {}).get(task_id)
-    return dict(saved) if isinstance(saved, dict) else None
+    return _public_task_record(saved) if isinstance(saved, dict) else None
 
 
 def _peer_config_candidates(path: Optional[Path] = None, os_name: Optional[str] = None) -> list[Path]:
@@ -638,16 +747,20 @@ def _peer_delegate_start(
     timeout_seconds: int = 3600,
     max_turns: int = 90,
     conversation_key: Optional[str] = None,
+    hard_timeout_seconds: Optional[int] = None,
 ) -> dict[str, Any]:
     thread_key = _peer_thread_key(peer_id, conversation_key)
-    return _peer_call(peer_id, "bridge_agent_delegate_start", {
+    arguments = {
         "prompt": prompt,
         "cwd": cwd,
         "timeout_seconds": timeout_seconds,
         "max_turns": max_turns,
         "a0_thread_key": thread_key,
         "caller": LOCAL_PEER_ID,
-    })
+    }
+    if hard_timeout_seconds is not None:
+        arguments["hard_timeout_seconds"] = hard_timeout_seconds
+    return _peer_call(peer_id, "bridge_agent_delegate_start", arguments)
 
 
 def add_windows_proxy_tools(mcp):
@@ -691,6 +804,7 @@ def add_windows_proxy_tools(mcp):
         a0_thread_key: Optional[str] = None,
         caller: Optional[str] = None,
         kill_on_timeout: bool = False,
+        hard_timeout_seconds: Optional[int] = None,
     ) -> str:
         """Delegate a task prompt to the native Windows Hermes agent.
 
@@ -700,9 +814,10 @@ def add_windows_proxy_tools(mcp):
         desktop, credential, or host integration access.
 
         For long-running work, this compatibility wrapper starts a background
-        task and waits up to timeout_seconds. If the task is still running, it
-        returns a task_id instead of killing Hermes unless kill_on_timeout is
-        true.
+        task and waits up to timeout_seconds for an inline result. If the task
+        is still running, it returns a task_id and polling guidance instead of
+        killing Hermes unless kill_on_timeout is true. The background execution
+        lifetime is controlled separately by hard_timeout_seconds.
         """
         timeout_i, err = _coerce_int_value(timeout_seconds, "timeout_seconds", 900, 1, 3600)
         if err:
@@ -710,8 +825,11 @@ def add_windows_proxy_tools(mcp):
         prepared, prep_error = _prepare_delegate(prompt, cwd, max_turns, a0_thread_key, caller)
         if prep_error:
             return _json({"error": prep_error, "cwd": cwd})
+        hard_timeout_i, hard_err = _resolve_hard_timeout_seconds(prepared, timeout_i or 900, hard_timeout_seconds)
+        if hard_err:
+            return _json({"error": hard_err})
 
-        task = _start_delegate_task(prepared, timeout_i or 900)
+        task = _start_delegate_task(prepared, hard_timeout_i or DEFAULT_HARD_TIMEOUT_SECONDS, wait_timeout_seconds=timeout_i or 900)
         task_id = task["task_id"]
         deadline = time.monotonic() + (timeout_i or 900)
         while time.monotonic() < deadline:
@@ -733,7 +851,10 @@ def add_windows_proxy_tools(mcp):
         status = _task_status(task_id) or task
         status.update({
             "status": "still_running" if not kill_on_timeout else status.get("status", "timed_out"),
-            "message": "Delegation is still running. Poll windows_agent_delegate_status with task_id.",
+            "message": "Delegation is still running without interrupting the Hermes session. Poll windows_agent_delegate_status with task_id.",
+            "poll_after_seconds": status.get("poll_after_seconds") or status.get("recommended_poll_seconds") or 5,
+            "status_tool": "windows_agent_delegate_status",
+            "result_tool": "windows_agent_delegate_result",
         })
         return _json(status)
 
@@ -745,24 +866,28 @@ def add_windows_proxy_tools(mcp):
         max_turns: int = 90,
         a0_thread_key: Optional[str] = None,
         caller: Optional[str] = None,
+        hard_timeout_seconds: Optional[int] = None,
     ) -> str:
-        """Start a native Windows Hermes delegation and return a pollable task_id."""
+        """Start a native Windows Hermes delegation and return a pollable task_id with adaptive timeout guidance."""
         timeout_i, err = _coerce_int_value(timeout_seconds, "timeout_seconds", 3600, 1, 24 * 3600)
         if err:
             return _json({"error": err})
         prepared, prep_error = _prepare_delegate(prompt, cwd, max_turns, a0_thread_key, caller)
         if prep_error:
             return _json({"error": prep_error, "cwd": cwd})
-        task = _start_delegate_task(prepared, timeout_i or 3600)
+        hard_timeout_i, hard_err = _resolve_hard_timeout_seconds(prepared, timeout_i or 3600, hard_timeout_seconds)
+        if hard_err:
+            return _json({"error": hard_err})
+        task = _start_delegate_task(prepared, hard_timeout_i or DEFAULT_HARD_TIMEOUT_SECONDS, wait_timeout_seconds=timeout_i or 3600)
         task.update({
-            "poll_after_seconds": 5,
+            "poll_after_seconds": task.get("poll_after_seconds") or task.get("recommended_poll_seconds") or 5,
             "message": "Delegation started. Poll windows_agent_delegate_status or windows_agent_delegate_result with task_id.",
         })
         return _json(task)
 
     @mcp.tool()
     def windows_agent_delegate_status(task_id: str) -> str:
-        """Return status for a background Hermes delegation task."""
+        """Return status, remaining deadline, and polling guidance for a background Hermes delegation task."""
         if not isinstance(task_id, str) or not task_id.strip():
             return _json({"error": "task_id is required"})
         status = _task_status(task_id.strip())
@@ -772,14 +897,14 @@ def add_windows_proxy_tools(mcp):
 
     @mcp.tool()
     def windows_agent_delegate_result(task_id: str) -> str:
-        """Return final output for a delegation task, or latest status if still running."""
+        """Return final output for a delegation task, or latest guided status if still running."""
         if not isinstance(task_id, str) or not task_id.strip():
             return _json({"error": "task_id is required"})
         status = _task_status(task_id.strip())
         if not status:
             return _json({"error": f"task not found: {task_id}"})
         if status.get("status") not in {"completed", "failed", "timed_out", "canceled"}:
-            status["message"] = "Delegation is still running. Poll again later."
+            status["message"] = "Delegation is still running without interrupting the Hermes session. Poll again later."
         return _json(status)
 
     @mcp.tool()
@@ -819,9 +944,10 @@ def add_windows_proxy_tools(mcp):
         timeout_seconds: int = 3600,
         max_turns: int = 90,
         conversation_key: Optional[str] = None,
+        hard_timeout_seconds: Optional[int] = None,
     ) -> str:
-        """Start a pollable delegation on a configured remote Hermes peer."""
-        return _json(_peer_delegate_start(peer_id, prompt, cwd, timeout_seconds, max_turns, conversation_key))
+        """Start a pollable delegation on a configured remote Hermes peer with adaptive timeout guidance."""
+        return _json(_peer_delegate_start(peer_id, prompt, cwd, timeout_seconds, max_turns, conversation_key, hard_timeout_seconds))
 
     @mcp.tool()
     def bridge_peer_delegate_status(peer_id: str, task_id: str) -> str:
@@ -852,9 +978,10 @@ def add_windows_proxy_tools(mcp):
         a0_thread_key: Optional[str] = None,
         caller: Optional[str] = None,
         kill_on_timeout: bool = False,
+        hard_timeout_seconds: Optional[int] = None,
     ) -> str:
         """Alias for windows_agent_delegate. Use this for direct A0-to-Hermes work."""
-        return windows_agent_delegate(prompt, cwd, timeout_seconds, max_turns, a0_thread_key, caller, kill_on_timeout)
+        return windows_agent_delegate(prompt, cwd, timeout_seconds, max_turns, a0_thread_key, caller, kill_on_timeout, hard_timeout_seconds)
 
     @mcp.tool()
     def bridge_agent_delegate_start(
@@ -864,9 +991,10 @@ def add_windows_proxy_tools(mcp):
         max_turns: int = 90,
         a0_thread_key: Optional[str] = None,
         caller: Optional[str] = None,
+        hard_timeout_seconds: Optional[int] = None,
     ) -> str:
         """Alias for windows_agent_delegate_start. Start a pollable direct Hermes task."""
-        return windows_agent_delegate_start(prompt, cwd, timeout_seconds, max_turns, a0_thread_key, caller)
+        return windows_agent_delegate_start(prompt, cwd, timeout_seconds, max_turns, a0_thread_key, caller, hard_timeout_seconds)
 
     @mcp.tool()
     def bridge_agent_delegate_status(task_id: str) -> str:
@@ -915,10 +1043,13 @@ def _create_delegate_only_server(
         instructions=(
             "Direct A0/Agentspine to native Windows Hermes bridge. Use "
             "bridge_agent_delegate_start/status/result/cancel, or "
-            "bridge_agent_delegate for short tasks. Use bridge_peer_* tools "
-            "for authenticated Hermes-to-Hermes network delegation. This "
-            "bridge does not require Telegram, Discord, Slack, WhatsApp, or "
-            "Hermes Gateway."
+            "bridge_agent_delegate for short compatibility calls. For long "
+            "tasks, start the delegation and poll status/result with the "
+            "returned task_id; timeout_seconds is the caller wait window, not "
+            "the background execution lifetime. Use bridge_peer_* tools for "
+            "authenticated Hermes-to-Hermes network delegation. This bridge "
+            "does not require Telegram, Discord, Slack, WhatsApp, or Hermes "
+            "Gateway."
         ),
         host=host,
         port=port,

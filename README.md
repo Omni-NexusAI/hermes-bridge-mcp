@@ -37,6 +37,13 @@ when `a0_thread_key` is provided. Long-running work should use
 `windows_agent_delegate_start`, then poll with `windows_agent_delegate_status`
 or `windows_agent_delegate_result`.
 
+Adaptive timeout behavior keeps long delegated tasks alive after the initiating
+MCP call returns. For `bridge_agent_delegate` and `windows_agent_delegate`,
+`timeout_seconds` is the inline wait before a pollable `task_id` is returned;
+the background task has a separate longer `hard_timeout_seconds`. Set
+`kill_on_timeout=true` only when the caller explicitly wants the old destructive
+timeout behavior.
+
 It does not expose a raw PowerShell or CMD proxy.
 
 ## Hermes-to-Hermes Peer Bridge
@@ -79,7 +86,7 @@ Static peer config lives at
 Peer tools:
 
 - `bridge_peer_status(peer_id)`
-- `bridge_peer_delegate_start(peer_id, prompt, cwd?, timeout_seconds?, max_turns?, conversation_key?)`
+- `bridge_peer_delegate_start(peer_id, prompt, cwd?, timeout_seconds?, max_turns?, conversation_key?, hard_timeout_seconds?)`
 - `bridge_peer_delegate_status(peer_id, task_id)`
 - `bridge_peer_delegate_result(peer_id, task_id)`
 - `bridge_peer_delegate_cancel(peer_id, task_id)`

@@ -2,6 +2,7 @@ import importlib.util
 import asyncio
 import sys
 import types
+import time
 from pathlib import Path
 
 
@@ -86,6 +87,90 @@ def test_public_task_record_drops_private_fields():
     assert "prompt" not in public
     assert "cwd_path" not in public
     assert public["stdout"] == "ok"
+
+
+def test_adaptive_timeout_helper_extends_long_tasks():
+    module = load_proxy_module()
+
+    shape = module._estimate_task_shape(
+        "Implement and test a deep research workflow with multiple validation passes.",
+        max_turns=120,
+        requested_wait_seconds=5,
+    )
+
+    assert shape["likely_long"] is True
+    assert shape["hard_timeout_seconds"] > 5
+    assert shape["recommended_poll_seconds"] >= 15
+
+
+def test_start_delegate_task_separates_wait_timeout_from_hard_deadline(monkeypatch, tmp_path):
+    module = load_proxy_module()
+    monkeypatch.setattr(module, "BRIDGE_STATE_DIR", tmp_path / "bridge-state")
+    monkeypatch.setattr(module, "BRIDGE_STATE_FILE", tmp_path / "bridge-state" / "state.json")
+
+    class FakeProc:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(module, "_start_hidden", lambda args, cwd: FakeProc())
+    monkeypatch.setattr(module.threading, "Thread", FakeThread)
+
+    task = module._start_delegate_task(
+        {
+            "args": ["fake-hermes"],
+            "cwd": tmp_path,
+            "prompt": "Implement a long task and report later.",
+            "max_turns": 100,
+            "a0_thread_key": "thread-1",
+            "resumed_session_id": None,
+        },
+        hard_timeout_seconds=7200,
+        wait_timeout_seconds=1,
+    )
+
+    assert task["timeout_seconds"] == 1
+    assert task["wait_timeout_seconds"] == 1
+    assert task["hard_timeout_seconds"] == 7200
+    assert task["hard_deadline_at"] > task["started_at"]
+    assert task["remaining_timeout_seconds"] > 0
+    assert task["status_tool"] == "bridge_agent_delegate_status"
+    assert task["result_tool"] == "bridge_agent_delegate_result"
+
+
+def test_task_status_adds_polling_guidance(monkeypatch):
+    module = load_proxy_module()
+    task_id = "task-guidance"
+    monkeypatch.setattr(module, "_TASKS", {
+        task_id: {
+            "task_id": task_id,
+            "status": "running",
+            "started_at": time.time() - 2,
+            "updated_at": time.time() - 2,
+            "hard_timeout_seconds": 3600,
+            "hard_deadline_at": time.time() + 3598,
+            "recommended_poll_seconds": 15,
+            "estimated_remaining_seconds": 600,
+            "stdout": "",
+            "stderr_tail": "",
+        }
+    })
+    monkeypatch.setattr(module, "_PROCS", {})
+
+    status = module._task_status(task_id)
+
+    assert status["poll_after_seconds"] == 15
+    assert status["remaining_timeout_seconds"] > 0
+    assert status["estimated_remaining_seconds"] <= 600
+    assert "Poll bridge_agent_delegate_status" in status["next_action"]
 
 
 def test_delegate_only_server_does_not_expose_messaging_tools():
@@ -298,6 +383,7 @@ def test_peer_delegate_start_forwards_per_peer_thread_key(monkeypatch):
         timeout_seconds=120,
         max_turns=5,
         conversation_key="shared-topic",
+        hard_timeout_seconds=7200,
     )
 
     assert result["task_id"] == "remote-task"
@@ -306,6 +392,7 @@ def test_peer_delegate_start_forwards_per_peer_thread_key(monkeypatch):
     assert tool_name == "bridge_agent_delegate_start"
     assert arguments["prompt"] == "hello"
     assert arguments["timeout_seconds"] == 120
+    assert arguments["hard_timeout_seconds"] == 7200
     assert arguments["max_turns"] == 5
     assert arguments["caller"] == "windows"
     assert arguments["a0_thread_key"].startswith("peer:windows:to:quest3:")
