@@ -20,10 +20,10 @@ async def call_json(session: ClientSession, name: str, args: dict) -> dict:
 async def wait_task(session: ClientSession, task_id: str, timeout_seconds: int = 240) -> dict:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        status = await call_json(session, "windows_agent_delegate_status", {"task_id": task_id})
+        status = await call_json(session, "bridge_agent_delegate_status", {"task_id": task_id})
         print(f"STATUS {task_id} {status.get('status')} elapsed_ms={status.get('elapsed_ms')}")
         if status.get("status") in {"completed", "failed", "timed_out", "canceled"}:
-            return await call_json(session, "windows_agent_delegate_result", {"task_id": task_id})
+            return await call_json(session, "bridge_agent_delegate_result", {"task_id": task_id})
         await asyncio.sleep(5)
     raise TimeoutError(task_id)
 
@@ -35,7 +35,7 @@ async def main() -> None:
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            first = await call_json(session, "windows_agent_delegate_start", {
+            first = await call_json(session, "bridge_agent_delegate_start", {
                 "prompt": "Reply exactly STAGING_BRIDGE_OK. Do not use tools.",
                 "a0_thread_key": thread_key,
                 "caller": "agentspine-standard-pre",
@@ -46,7 +46,7 @@ async def main() -> None:
             first_result = await wait_task(session, first["task_id"])
             print("FIRST_RESULT=" + json.dumps(first_result, sort_keys=True)[:2000])
 
-            second = await call_json(session, "windows_agent_delegate_start", {
+            second = await call_json(session, "bridge_agent_delegate_start", {
                 "prompt": "Reply exactly STAGING_BRIDGE_RESUME_OK. Do not use tools.",
                 "a0_thread_key": thread_key,
                 "caller": "agentspine-standard-pre",
@@ -57,7 +57,7 @@ async def main() -> None:
             second_result = await wait_task(session, second["task_id"])
             print("SECOND_RESULT=" + json.dumps(second_result, sort_keys=True)[:2000])
 
-            timeout_probe = await call_json(session, "windows_agent_delegate", {
+            timeout_probe = await call_json(session, "bridge_agent_delegate", {
                 "prompt": "Reply exactly TIMEOUT_PROBE_OK. Do not use tools.",
                 "a0_thread_key": thread_key + "-timeout",
                 "caller": "agentspine-standard-pre",
@@ -66,7 +66,7 @@ async def main() -> None:
             })
             print("TIMEOUT_PROBE=" + json.dumps(timeout_probe, sort_keys=True)[:2000])
             if timeout_probe.get("task_id") and timeout_probe.get("status") == "still_running":
-                canceled = await call_json(session, "windows_agent_delegate_cancel", {
+                canceled = await call_json(session, "bridge_agent_delegate_cancel", {
                     "task_id": timeout_probe["task_id"],
                 })
                 print("TIMEOUT_CANCEL=" + json.dumps(canceled, sort_keys=True)[:2000])

@@ -152,6 +152,10 @@ def _configured_auth_token() -> Optional[str]:
     return _env_value("HERMES_BRIDGE_AUTH_TOKEN") or _configured_pair_key()
 
 
+def _legacy_windows_tools_enabled() -> bool:
+    return str(os.environ.get("HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _auth_tokens(auth_token: Optional[str] = None) -> list[str]:
     tokens: list[str] = []
     for token in (auth_token, _configured_pair_key()):
@@ -227,7 +231,7 @@ def _update_session_record(a0_thread_key: str, session_id: str, cwd: Optional[Pa
             "session_id": session_id,
             "updated_at": _now(),
             "cwd": str(cwd) if cwd else "",
-            "source": "mcp-windows-proxy",
+            "source": "mcp-hermes-bridge",
         }
         _save_state(data)
 
@@ -440,7 +444,7 @@ def _build_delegate_args(prompt: str, max_turns: int, session_id: Optional[str])
         "chat",
         "--query", prompt,
         "--quiet",
-        "--source", "mcp-windows-proxy",
+        "--source", "mcp-hermes-bridge",
         "--accept-hooks",
         "--pass-session-id",
         "--max-turns", str(max_turns),
@@ -763,10 +767,13 @@ def _peer_delegate_start(
     return _peer_call(peer_id, "bridge_agent_delegate_start", arguments)
 
 
-def add_windows_proxy_tools(mcp):
-    @mcp.tool()
+def add_bridge_tools(mcp):
+    def legacy_windows_tool(func):
+        return mcp.tool()(func) if _legacy_windows_tools_enabled() else func
+
+    @legacy_windows_tool
     def windows_agent_status() -> str:
-        """Report native Windows Hermes proxy readiness.
+        """Report local Hermes bridge readiness.
 
         Direct delegation does not require Telegram or Hermes Gateway.
         """
@@ -788,14 +795,14 @@ def add_windows_proxy_tools(mcp):
             "default_cwd": str(DEFAULT_CWD),
             "delegate_runner_available": _delegate_runner_available(),
             "delegate_requires_telegram_gateway": False,
-            "delegate_transport": "local hermes chat subprocess via Hermes bridge",
+            "delegate_transport": "local hermes chat subprocess via Hermes Bridge",
             "tracked_a0_threads": len(state.get("sessions", {})),
             "tracked_tasks": len(state.get("tasks", {})),
             "version": version,
             "config_path": config_path,
         })
 
-    @mcp.tool()
+    @legacy_windows_tool
     def windows_agent_delegate(
         prompt: str,
         cwd: Optional[str] = None,
@@ -806,12 +813,11 @@ def add_windows_proxy_tools(mcp):
         kill_on_timeout: bool = False,
         hard_timeout_seconds: Optional[int] = None,
     ) -> str:
-        """Delegate a task prompt to the native Windows Hermes agent.
+        """Delegate a task prompt to the local Hermes bridge agent.
 
-        The task runs through Windows Hermes itself, not a raw shell proxy. The
-        Windows agent uses its normal tool and approval policy. Use this when a
-        Docker-hosted Hermes agent needs native Windows filesystem, process,
-        desktop, credential, or host integration access.
+        The task runs through Hermes itself, not a raw shell proxy. The local
+        bridge agent uses its normal tools, memory, session state, and approval
+        policy.
 
         For long-running work, this compatibility wrapper starts a background
         task and waits up to timeout_seconds for an inline result. If the task
@@ -851,14 +857,14 @@ def add_windows_proxy_tools(mcp):
         status = _task_status(task_id) or task
         status.update({
             "status": "still_running" if not kill_on_timeout else status.get("status", "timed_out"),
-            "message": "Delegation is still running without interrupting the Hermes session. Poll windows_agent_delegate_status with task_id.",
+            "message": "Delegation is still running without interrupting the Hermes session. Poll bridge_agent_delegate_status with task_id.",
             "poll_after_seconds": status.get("poll_after_seconds") or status.get("recommended_poll_seconds") or 5,
-            "status_tool": "windows_agent_delegate_status",
-            "result_tool": "windows_agent_delegate_result",
+            "status_tool": "bridge_agent_delegate_status",
+            "result_tool": "bridge_agent_delegate_result",
         })
         return _json(status)
 
-    @mcp.tool()
+    @legacy_windows_tool
     def windows_agent_delegate_start(
         prompt: str,
         cwd: Optional[str] = None,
@@ -868,7 +874,7 @@ def add_windows_proxy_tools(mcp):
         caller: Optional[str] = None,
         hard_timeout_seconds: Optional[int] = None,
     ) -> str:
-        """Start a native Windows Hermes delegation and return a pollable task_id with adaptive timeout guidance."""
+        """Start a local Hermes bridge delegation and return a pollable task_id with adaptive timeout guidance."""
         timeout_i, err = _coerce_int_value(timeout_seconds, "timeout_seconds", 3600, 1, 24 * 3600)
         if err:
             return _json({"error": err})
@@ -881,11 +887,11 @@ def add_windows_proxy_tools(mcp):
         task = _start_delegate_task(prepared, hard_timeout_i or DEFAULT_HARD_TIMEOUT_SECONDS, wait_timeout_seconds=timeout_i or 3600)
         task.update({
             "poll_after_seconds": task.get("poll_after_seconds") or task.get("recommended_poll_seconds") or 5,
-            "message": "Delegation started. Poll windows_agent_delegate_status or windows_agent_delegate_result with task_id.",
+            "message": "Delegation started. Poll bridge_agent_delegate_status or bridge_agent_delegate_result with task_id.",
         })
         return _json(task)
 
-    @mcp.tool()
+    @legacy_windows_tool
     def windows_agent_delegate_status(task_id: str) -> str:
         """Return status, remaining deadline, and polling guidance for a background Hermes delegation task."""
         if not isinstance(task_id, str) or not task_id.strip():
@@ -895,7 +901,7 @@ def add_windows_proxy_tools(mcp):
             return _json({"error": f"task not found: {task_id}"})
         return _json(status)
 
-    @mcp.tool()
+    @legacy_windows_tool
     def windows_agent_delegate_result(task_id: str) -> str:
         """Return final output for a delegation task, or latest guided status if still running."""
         if not isinstance(task_id, str) or not task_id.strip():
@@ -907,7 +913,7 @@ def add_windows_proxy_tools(mcp):
             status["message"] = "Delegation is still running without interrupting the Hermes session. Poll again later."
         return _json(status)
 
-    @mcp.tool()
+    @legacy_windows_tool
     def windows_agent_delegate_cancel(task_id: str) -> str:
         """Cancel a running Hermes delegation task."""
         if not isinstance(task_id, str) or not task_id.strip():
@@ -966,7 +972,7 @@ def add_windows_proxy_tools(mcp):
 
     @mcp.tool()
     def bridge_agent_status() -> str:
-        """Alias for windows_agent_status. Does not require Telegram."""
+        """Report local Hermes bridge readiness. Does not require Telegram or Hermes Gateway."""
         return windows_agent_status()
 
     @mcp.tool()
@@ -980,7 +986,7 @@ def add_windows_proxy_tools(mcp):
         kill_on_timeout: bool = False,
         hard_timeout_seconds: Optional[int] = None,
     ) -> str:
-        """Alias for windows_agent_delegate. Use this for direct A0-to-Hermes work."""
+        """Delegate a prompt to the local Hermes bridge agent using its normal tools, memory, and session state."""
         return windows_agent_delegate(prompt, cwd, timeout_seconds, max_turns, a0_thread_key, caller, kill_on_timeout, hard_timeout_seconds)
 
     @mcp.tool()
@@ -993,23 +999,26 @@ def add_windows_proxy_tools(mcp):
         caller: Optional[str] = None,
         hard_timeout_seconds: Optional[int] = None,
     ) -> str:
-        """Alias for windows_agent_delegate_start. Start a pollable direct Hermes task."""
+        """Start a pollable local Hermes bridge delegation task."""
         return windows_agent_delegate_start(prompt, cwd, timeout_seconds, max_turns, a0_thread_key, caller, hard_timeout_seconds)
 
     @mcp.tool()
     def bridge_agent_delegate_status(task_id: str) -> str:
-        """Alias for windows_agent_delegate_status."""
+        """Return status, remaining deadline, and polling guidance for a local Hermes bridge delegation task."""
         return windows_agent_delegate_status(task_id)
 
     @mcp.tool()
     def bridge_agent_delegate_result(task_id: str) -> str:
-        """Alias for windows_agent_delegate_result."""
+        """Return final output for a local Hermes bridge delegation task, or latest guided status if still running."""
         return windows_agent_delegate_result(task_id)
 
     @mcp.tool()
     def bridge_agent_delegate_cancel(task_id: str) -> str:
-        """Alias for windows_agent_delegate_cancel."""
+        """Cancel a running local Hermes bridge delegation task."""
         return windows_agent_delegate_cancel(task_id)
+
+
+add_windows_proxy_tools = add_bridge_tools
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -1041,7 +1050,7 @@ def _create_delegate_only_server(
     return FastMCP(
         "hermes-bridge",
         instructions=(
-            "Direct A0/Agentspine to native Windows Hermes bridge. Use "
+            "Direct agents to the local Hermes Bridge agent. Use "
             "bridge_agent_delegate_start/status/result/cancel, or "
             "bridge_agent_delegate for short compatibility calls. For long "
             "tasks, start the delegation and poll status/result with the "
@@ -1077,7 +1086,7 @@ def main() -> None:
             raise SystemExit(auth_error)
 
     server = _create_delegate_only_server(args.host, args.port, args.auth_token)
-    add_windows_proxy_tools(server)
+    add_bridge_tools(server)
 
     async def _run() -> None:
         if args.transport == "streamable-http":

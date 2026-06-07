@@ -19,15 +19,13 @@ async def main() -> None:
             wanted = [
                 name
                 for name in names
-                if name == "windows_agent_status"
-                or name.startswith("windows_agent_delegate")
-                or name == "bridge_agent_status"
+                if name == "bridge_agent_status"
                 or name.startswith("bridge_agent_delegate")
             ]
             print("TOOLS=" + ",".join(sorted(wanted)))
             messaging = [name for name in names if name in {"messages_send", "conversations_list"}]
             print("MESSAGING_TOOLS=" + ",".join(sorted(messaging)))
-            result = await session.call_tool("windows_agent_status", {})
+            result = await session.call_tool("bridge_agent_status", {})
             print(result.content[0].text[:1200])
 
 

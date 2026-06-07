@@ -187,7 +187,7 @@ def test_task_status_adds_polling_guidance(monkeypatch):
 def test_delegate_only_server_does_not_expose_messaging_tools():
     module = load_proxy_module()
     server = module._create_delegate_only_server()
-    module.add_windows_proxy_tools(server)
+    module.add_bridge_tools(server)
 
     async def collect_names():
         tools = await server.list_tools()
@@ -198,9 +198,26 @@ def test_delegate_only_server_does_not_expose_messaging_tools():
     assert "messages_send" not in names
     assert "conversations_list" not in names
     assert "bridge_agent_delegate_start" in names
-    assert "windows_agent_delegate_start" in names
+    assert "windows_agent_delegate_start" not in names
     assert "bridge_peer_delegate_start" in names
     assert "bridge_peer_status" in names
+
+
+def test_legacy_windows_tools_are_opt_in(monkeypatch):
+    module = load_proxy_module()
+    monkeypatch.setenv("HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS", "1")
+    server = module._create_delegate_only_server()
+    module.add_bridge_tools(server)
+
+    async def collect_names():
+        tools = await server.list_tools()
+        return {tool.name for tool in tools}
+
+    names = asyncio.run(collect_names())
+
+    assert "bridge_agent_delegate_start" in names
+    assert "windows_agent_delegate_start" in names
+    assert "windows_agent_status" in names
 
 
 def test_cross_platform_home_prefers_env(monkeypatch, tmp_path):
@@ -401,6 +418,7 @@ def test_peer_delegate_start_forwards_per_peer_thread_key(monkeypatch):
     peer_id, tool_name, arguments = calls[0]
     assert peer_id == "quest3"
     assert tool_name == "bridge_agent_delegate_start"
+    assert not tool_name.startswith("windows_agent_")
     assert arguments["prompt"] == "hello"
     assert arguments["timeout_seconds"] == 120
     assert arguments["hard_timeout_seconds"] == 7200

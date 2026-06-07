@@ -36,7 +36,7 @@ Each record can use the shared `HERMES_BRIDGE_PAIR_KEY`, or a distinct
 ## Run
 
 ```sh
-sh bin/start-android-hermes-peer-bridge.sh
+sh bin/start-hermes-bridge-peer.sh
 ```
 
 The Android peer bridge listens on:
@@ -47,7 +47,7 @@ http://QUEST_LAN_IP:18084/mcp
 
 ## First Smoke Tests
 
-From Windows Hermes, call:
+From the Windows peer, call:
 
 ```text
 bridge_peer_status(peer_id="quest3")
@@ -63,7 +63,7 @@ bridge_peer_delegate_start(
 )
 ```
 
-From Quest Hermes, call the reverse direction:
+From the Quest peer, call the reverse direction:
 
 ```text
 bridge_peer_status(peer_id="windows")

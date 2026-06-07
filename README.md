@@ -1,9 +1,9 @@
 # Hermes Bridge MCP
 
-Bridge Docker-hosted Hermes to native Windows Hermes through MCP.
+Bridge one Hermes agent to another Hermes agent through MCP.
 
 Hermes Bridge MCP exposes direct delegation tools so a Docker-hosted agent such
-as A0/Agentspine can delegate work to native Windows Hermes. Delegated work runs
+as A0/Agentspine can delegate work to a local Hermes Bridge agent. Delegated work runs
 through Hermes itself, so Hermes can use its normal tools, session persistence,
 memory, and approval policy.
 
@@ -25,22 +25,25 @@ bridge anymore; install Hermes messaging integrations separately if needed.
 - `bridge_agent_delegate_status`
 - `bridge_agent_delegate_result`
 - `bridge_agent_delegate_cancel`
-- `windows_agent_*` compatibility aliases for older bridge clients
 - `bridge_peer_*` tools for authenticated Hermes-to-Hermes delegation
 
-`windows_agent_delegate` runs the task through native Windows Hermes:
+Legacy `windows_agent_*` aliases are hidden by default. Set
+`HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS=1` only for older bridge clients that
+still call those names.
+
+`bridge_agent_delegate` runs the task through the local Hermes Bridge agent:
 
 ```text
-hermes chat --query ... --quiet --source mcp-windows-proxy --accept-hooks
+hermes chat --query ... --quiet --source mcp-hermes-bridge --accept-hooks
 ```
 
 The delegate tool now resumes a persistent Hermes session per A0 thread key
 when `a0_thread_key` is provided. Long-running work should use
-`windows_agent_delegate_start`, then poll with `windows_agent_delegate_status`
-or `windows_agent_delegate_result`.
+`bridge_agent_delegate_start`, then poll with `bridge_agent_delegate_status`
+or `bridge_agent_delegate_result`.
 
 Adaptive timeout behavior keeps long delegated tasks alive after the initiating
-MCP call returns. For `bridge_agent_delegate` and `windows_agent_delegate`,
+MCP call returns. For `bridge_agent_delegate`,
 `timeout_seconds` is the inline wait before a pollable `task_id` is returned;
 the background task has a separate longer `hard_timeout_seconds`. Set
 `kill_on_timeout=true` only when the caller explicitly wants the old destructive
@@ -55,7 +58,7 @@ require `supergateway`:
 
 ```powershell
 $env:HERMES_BRIDGE_PAIR_KEY = "same-secret-on-each-paired-agent"
-powershell -ExecutionPolicy Bypass -File $env:LOCALAPPDATA\hermes\bin\start-windows-hermes-peer-bridge.ps1
+powershell -ExecutionPolicy Bypass -File $env:LOCALAPPDATA\hermes\bin\start-hermes-bridge-peer.ps1
 ```
 
 Android/Termux:
@@ -63,7 +66,7 @@ Android/Termux:
 ```sh
 python -m pip install -r requirements-android.txt
 cp config/android-peer.env.example config/android-peer.env
-sh bin/start-android-hermes-peer-bridge.sh
+sh bin/start-hermes-bridge-peer.sh
 ```
 
 Peer endpoints default to `http://<LAN-IP>:18084/mcp`. Keep `18082` and `18083`
@@ -101,7 +104,7 @@ entry can use a distinct `pair_key_env`. Legacy `HERMES_BRIDGE_AUTH_TOKEN`,
 
 ## Requirements
 
-- Native Windows Hermes installed at `%LOCALAPPDATA%\hermes`
+- A local Hermes install available to the bridge runtime
 - Docker Hermes configured with access to `host.docker.internal`
 - Node.js with `supergateway` installed globally:
 
@@ -126,7 +129,7 @@ In Docker Hermes `config.yaml`:
 
 ```yaml
 mcp_servers:
-  windows-hermes:
+  hermes-bridge:
     url: http://host.docker.internal:18082/mcp
     timeout: 120
     connect_timeout: 30
@@ -140,7 +143,7 @@ Streamable HTTP at `/mcp`.
 From the Docker Hermes container:
 
 ```bash
-hermes mcp test windows-hermes
+hermes mcp test hermes-bridge
 ```
 
 Expected result includes direct delegation tools such as:
@@ -149,8 +152,7 @@ Expected result includes direct delegation tools such as:
 bridge_agent_status
 bridge_agent_delegate
 bridge_agent_delegate_start
-windows_agent_status
-windows_agent_delegate
+bridge_peer_status
 ```
 
 You can also test the proxy directly:
@@ -164,8 +166,8 @@ async def main():
     async with streamable_http_client("http://host.docker.internal:18082/mcp") as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            result = await session.call_tool("windows_agent_delegate", {
-                "prompt": "Reply exactly WINDOWS_PROXY_OK and do not use tools.",
+            result = await session.call_tool("bridge_agent_delegate", {
+                "prompt": "Reply exactly HERMES_BRIDGE_OK and do not use tools.",
                 "timeout_seconds": 180,
                 "max_turns": 10,
             })
@@ -176,13 +178,13 @@ asyncio.run(main())
 
 ## Files
 
-- `bin/windows-hermes-proxy-mcp.py` - companion MCP server
-- `bin/windows-hermes-mcp-serve.cmd` - stdio entrypoint for supergateway
-- `bin/start-windows-hermes-bridge.ps1` - starts supergateway on port 18082
-- `bin/start-windows-hermes-bridge-staging.ps1` - starts a staging bridge on port 18083
-- `bin/start-windows-hermes-peer-bridge.ps1` - starts native HTTP peer bridge on port 18084
-- `bin/start-android-hermes-peer-bridge.sh` - starts native HTTP peer bridge on Android/Termux
-- `bin/windows-hermes-bridge-background-watchdog.ps1` - hidden bridge watchdog
+- `bin/windows-hermes-proxy-mcp.py` - universal companion MCP server; filename retained for compatibility
+- `bin/hermes-bridge-mcp-serve.cmd` - universal stdio entrypoint wrapper for supergateway on Windows
+- `bin/start-hermes-bridge-peer.ps1` - universal Windows peer launcher wrapper
+- `bin/start-hermes-bridge-peer.sh` - universal POSIX/Android peer launcher wrapper
+- `bin/start-windows-hermes-bridge*.ps1` - Windows-specific A0 bridge launchers
+- `bin/start-android-hermes-peer-bridge.sh` - Android/Termux-specific peer launcher implementation
+- `bin/windows-hermes-bridge-background-watchdog.ps1` - Windows-specific bridge watchdog
 - `config/*.example.*` - peer config and env templates
 - `docs/quest-android-setup.md` - Android/Quest setup checklist
 - `startup/*.vbs` - hidden Startup-folder launchers
@@ -191,6 +193,6 @@ asyncio.run(main())
 
 - Existing Docker Hermes sessions may cache MCP tools. Restart Docker Hermes or
   start a new session after installing.
-- The bridge endpoint remains `windows-hermes` at
-  `host.docker.internal:18082/mcp`.
-- Delegated tasks use Windows Hermes normal approval policy.
+- New installs should use the MCP server name `hermes-bridge`. Existing
+  `windows-hermes` endpoint names can remain as legacy configuration aliases.
+- Delegated tasks use the local Hermes agent's normal approval policy.
