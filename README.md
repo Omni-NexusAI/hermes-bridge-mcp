@@ -14,6 +14,8 @@ device.
 
 This bridge is not a Hermes messaging gateway proxy. It does not expose Telegram,
 Discord, Slack, WhatsApp, or `messages_send`/`conversations_list` tools.
+Messaging gateway launchers and watchdogs are intentionally not shipped by this
+bridge anymore; install Hermes messaging integrations separately if needed.
 
 ## What It Provides
 
@@ -181,8 +183,6 @@ asyncio.run(main())
 - `bin/start-windows-hermes-peer-bridge.ps1` - starts native HTTP peer bridge on port 18084
 - `bin/start-android-hermes-peer-bridge.sh` - starts native HTTP peer bridge on Android/Termux
 - `bin/windows-hermes-bridge-background-watchdog.ps1` - hidden bridge watchdog
-- `bin/start-windows-hermes-gateway.ps1` - optional native Windows Hermes messaging gateway helper
-- `bin/windows-hermes-gateway-background-watchdog.ps1` - optional messaging gateway watchdog
 - `config/*.example.*` - peer config and env templates
 - `docs/quest-android-setup.md` - Android/Quest setup checklist
 - `startup/*.vbs` - hidden Startup-folder launchers

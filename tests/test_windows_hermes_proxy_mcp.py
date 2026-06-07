@@ -29,6 +29,17 @@ def test_bridge_does_not_import_hermes_messaging_server():
     assert "EventBridge" not in source
 
 
+def test_messaging_gateway_artifacts_are_not_shipped():
+    root = Path(__file__).resolve().parents[1]
+    forbidden = [
+        root / "bin" / "start-windows-hermes-gateway.ps1",
+        root / "bin" / "windows-hermes-gateway-background-watchdog.ps1",
+        root / "startup" / "Watch Windows Hermes Gateway.vbs",
+    ]
+
+    assert [path for path in forbidden if path.exists()] == []
+
+
 def test_extract_session_id_from_quiet_stderr():
     module = load_proxy_module()
 
