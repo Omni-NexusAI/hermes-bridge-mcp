@@ -1,0 +1,427 @@
+import importlib.util
+import asyncio
+import sys
+import types
+import time
+from pathlib import Path
+
+
+def load_proxy_module():
+    fake_mcp = types.ModuleType("mcp_serve")
+    fake_mcp.EventBridge = object
+    fake_mcp.create_mcp_server = lambda event_bridge=None: object()
+    sys.modules.setdefault("mcp_serve", fake_mcp)
+
+    path = Path(__file__).resolve().parents[1] / "bin" / "windows-hermes-proxy-mcp.py"
+    spec = importlib.util.spec_from_file_location("windows_hermes_proxy_mcp_test", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_bridge_does_not_import_hermes_messaging_server():
+    path = Path(__file__).resolve().parents[1] / "bin" / "windows-hermes-proxy-mcp.py"
+    source = path.read_text(encoding="utf-8")
+
+    assert "from mcp_serve import" not in source
+    assert "create_mcp_server" not in source
+    assert "EventBridge" not in source
+
+
+def test_messaging_gateway_artifacts_are_not_shipped():
+    root = Path(__file__).resolve().parents[1]
+    forbidden = [
+        root / "bin" / "start-windows-hermes-gateway.ps1",
+        root / "bin" / "windows-hermes-gateway-background-watchdog.ps1",
+        root / "startup" / "Watch Windows Hermes Gateway.vbs",
+    ]
+
+    assert [path for path in forbidden if path.exists()] == []
+
+
+def test_extract_session_id_from_quiet_stderr():
+    module = load_proxy_module()
+
+    assert module._extract_session_id("final answer", "\nsession_id: 20260601_123456_ab12cd\n") == "20260601_123456_ab12cd"
+
+
+def test_delegate_args_resume_existing_session():
+    module = load_proxy_module()
+
+    args = module._build_delegate_args("hello", 12, "sess_123")
+
+    assert "--pass-session-id" in args
+    assert "--resume" in args
+    assert args[args.index("--resume") + 1] == "sess_123"
+    assert args[args.index("--max-turns") + 1] == "12"
+
+
+def test_prepare_delegate_reuses_thread_session(tmp_path, monkeypatch):
+    module = load_proxy_module()
+    state_file = tmp_path / "bridge-state" / "state.json"
+    hermes_exe = tmp_path / "hermes.exe"
+    hermes_exe.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(module, "BRIDGE_STATE_DIR", state_file.parent)
+    monkeypatch.setattr(module, "BRIDGE_STATE_FILE", state_file)
+    monkeypatch.setattr(module, "HERMES_EXE", hermes_exe)
+    module._update_session_record("a0-thread-1", "sess_abc", tmp_path)
+
+    prepared, error = module._prepare_delegate(
+        "do work",
+        str(tmp_path),
+        90,
+        "a0-thread-1",
+        "agentspine",
+    )
+
+    assert error is None
+    assert prepared["a0_thread_key"] == "a0-thread-1"
+    assert prepared["resumed_session_id"] == "sess_abc"
+    assert "--resume" in prepared["args"]
+
+
+def test_public_task_record_drops_private_fields():
+    module = load_proxy_module()
+
+    public = module._public_task_record({
+        "task_id": "t1",
+        "args": ["secret"],
+        "prompt": "hidden",
+        "cwd_path": Path("."),
+        "stdout": "ok",
+        "stderr_tail": "",
+    })
+
+    assert "args" not in public
+    assert "prompt" not in public
+    assert "cwd_path" not in public
+    assert public["stdout"] == "ok"
+
+
+def test_adaptive_timeout_helper_extends_long_tasks():
+    module = load_proxy_module()
+
+    shape = module._estimate_task_shape(
+        "Implement and test a deep research workflow with multiple validation passes.",
+        max_turns=120,
+        requested_wait_seconds=5,
+    )
+
+    assert shape["likely_long"] is True
+    assert shape["hard_timeout_seconds"] > 5
+    assert shape["recommended_poll_seconds"] >= 15
+
+
+def test_start_delegate_task_separates_wait_timeout_from_hard_deadline(monkeypatch, tmp_path):
+    module = load_proxy_module()
+    monkeypatch.setattr(module, "BRIDGE_STATE_DIR", tmp_path / "bridge-state")
+    monkeypatch.setattr(module, "BRIDGE_STATE_FILE", tmp_path / "bridge-state" / "state.json")
+
+    class FakeProc:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(module, "_start_hidden", lambda args, cwd: FakeProc())
+    monkeypatch.setattr(module.threading, "Thread", FakeThread)
+
+    task = module._start_delegate_task(
+        {
+            "args": ["fake-hermes"],
+            "cwd": tmp_path,
+            "prompt": "Implement a long task and report later.",
+            "max_turns": 100,
+            "a0_thread_key": "thread-1",
+            "resumed_session_id": None,
+        },
+        hard_timeout_seconds=7200,
+        wait_timeout_seconds=1,
+    )
+
+    assert task["timeout_seconds"] == 1
+    assert task["wait_timeout_seconds"] == 1
+    assert task["hard_timeout_seconds"] == 7200
+    assert task["hard_deadline_at"] > task["started_at"]
+    assert task["remaining_timeout_seconds"] > 0
+    assert task["status_tool"] == "bridge_agent_delegate_status"
+    assert task["result_tool"] == "bridge_agent_delegate_result"
+
+
+def test_task_status_adds_polling_guidance(monkeypatch):
+    module = load_proxy_module()
+    task_id = "task-guidance"
+    monkeypatch.setattr(module, "_TASKS", {
+        task_id: {
+            "task_id": task_id,
+            "status": "running",
+            "started_at": time.time() - 2,
+            "updated_at": time.time() - 2,
+            "hard_timeout_seconds": 3600,
+            "hard_deadline_at": time.time() + 3598,
+            "recommended_poll_seconds": 15,
+            "estimated_remaining_seconds": 600,
+            "stdout": "",
+            "stderr_tail": "",
+        }
+    })
+    monkeypatch.setattr(module, "_PROCS", {})
+
+    status = module._task_status(task_id)
+
+    assert status["poll_after_seconds"] == 15
+    assert status["remaining_timeout_seconds"] > 0
+    assert status["estimated_remaining_seconds"] <= 600
+    assert "Poll bridge_agent_delegate_status" in status["next_action"]
+
+
+def test_delegate_only_server_does_not_expose_messaging_tools():
+    module = load_proxy_module()
+    server = module._create_delegate_only_server()
+    module.add_bridge_tools(server)
+
+    async def collect_names():
+        tools = await server.list_tools()
+        return {tool.name for tool in tools}
+
+    names = asyncio.run(collect_names())
+
+    assert "messages_send" not in names
+    assert "conversations_list" not in names
+    assert "bridge_agent_delegate_start" in names
+    assert "windows_agent_delegate_start" not in names
+    assert "bridge_peer_delegate_start" in names
+    assert "bridge_peer_status" in names
+
+
+def test_legacy_windows_tools_are_opt_in(monkeypatch):
+    module = load_proxy_module()
+    monkeypatch.setenv("HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS", "1")
+    server = module._create_delegate_only_server()
+    module.add_bridge_tools(server)
+
+    async def collect_names():
+        tools = await server.list_tools()
+        return {tool.name for tool in tools}
+
+    names = asyncio.run(collect_names())
+
+    assert "bridge_agent_delegate_start" in names
+    assert "windows_agent_delegate_start" in names
+    assert "windows_agent_status" in names
+
+
+def test_cross_platform_home_prefers_env(monkeypatch, tmp_path):
+    module = load_proxy_module()
+    home = tmp_path / "hermes-home"
+    monkeypatch.setenv("HERMES_BRIDGE_HOME", str(home))
+
+    assert module._default_hermes_home() == home
+
+
+def test_peer_config_loads_static_peers_and_token_env(tmp_path, monkeypatch):
+    module = load_proxy_module()
+    config = tmp_path / "peers.json"
+    config.write_text(
+        """
+        {
+          "peers": [
+            {
+              "peer_id": "quest3",
+              "url": "http://10.0.0.42:18084/mcp",
+              "platform": "android",
+              "token_env": "QUEST_TOKEN"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("QUEST_TOKEN", "secret")
+
+    peers = module._load_peer_config(config)
+
+    assert peers["quest3"]["url"] == "http://10.0.0.42:18084/mcp"
+    assert peers["quest3"]["platform"] == "android"
+    assert peers["quest3"]["token"] == "secret"
+
+
+def test_peer_config_prefers_pair_key_env(tmp_path, monkeypatch):
+    module = load_proxy_module()
+    config = tmp_path / "peers.json"
+    config.write_text(
+        """
+        {
+          "peers": [
+            {
+              "peer_id": "quest3",
+              "url": "http://10.0.0.42:18084/mcp",
+              "platform": "android",
+              "pair_key_env": "HERMES_PAIR_QUEST3",
+              "token_env": "OLD_QUEST_TOKEN"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_PAIR_QUEST3", "pair-secret")
+    monkeypatch.setenv("OLD_QUEST_TOKEN", "legacy-secret")
+
+    peers = module._load_peer_config(config)
+
+    assert peers["quest3"]["token"] == "pair-secret"
+    assert peers["quest3"]["pair_key_env"] == "HERMES_PAIR_QUEST3"
+
+
+def test_peer_config_uses_default_pair_key_for_multiple_peers(tmp_path, monkeypatch):
+    module = load_proxy_module()
+    config = tmp_path / "peers.json"
+    config.write_text(
+        """
+        {
+          "peers": [
+            {"peer_id": "quest3", "url": "http://10.0.0.42:18084/mcp"},
+            {"peer_id": "laptop", "url": "http://10.0.0.43:18084/mcp"}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_BRIDGE_PAIR_KEY", "shared-pair-secret")
+
+    peers = module._load_peer_config(config)
+
+    assert peers["quest3"]["token"] == "shared-pair-secret"
+    assert peers["laptop"]["token"] == "shared-pair-secret"
+
+
+def test_peer_config_supports_distinct_per_peer_pair_keys(tmp_path, monkeypatch):
+    module = load_proxy_module()
+    config = tmp_path / "peers.json"
+    config.write_text(
+        """
+        {
+          "peers": [
+            {"peer_id": "quest3", "url": "http://10.0.0.42:18084/mcp", "pair_key_env": "PAIR_QUEST"},
+            {"peer_id": "laptop", "url": "http://10.0.0.43:18084/mcp", "pair_key_env": "PAIR_LAPTOP"}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PAIR_QUEST", "quest-secret")
+    monkeypatch.setenv("PAIR_LAPTOP", "laptop-secret")
+
+    peers = module._load_peer_config(config)
+
+    assert peers["quest3"]["token"] == "quest-secret"
+    assert peers["laptop"]["token"] == "laptop-secret"
+
+
+def test_peer_config_candidates_include_android_shared_storage(tmp_path):
+    module = load_proxy_module()
+    primary = tmp_path / "peers.json"
+
+    assert module._peer_config_candidates(primary)[0] == primary
+
+    candidates = [candidate.as_posix() for candidate in module._peer_config_candidates(primary, os_name="posix")]
+
+    assert "/sdcard/Download/hermes-q3-peers.json" in candidates
+    assert "/storage/self/primary/Download/hermes-q3-peers.json" in candidates
+
+
+def test_lan_peer_http_requires_token():
+    module = load_proxy_module()
+
+    assert module._validate_http_auth("0.0.0.0", None, False)
+    assert module._validate_http_auth("0.0.0.0", "secret", False) is None
+    assert module._validate_http_auth("127.0.0.1", None, False) is None
+
+
+def test_lan_peer_http_accepts_pair_key(monkeypatch):
+    module = load_proxy_module()
+    monkeypatch.setenv("HERMES_BRIDGE_PAIR_KEY", "pair-secret")
+
+    assert module._validate_http_auth("0.0.0.0", None, False) is None
+
+
+def test_shared_token_verifier_accepts_only_configured_tokens():
+    module = load_proxy_module()
+    verifier = module._SharedTokenVerifier(["legacy-secret", "pair-secret"])
+
+    async def check():
+        accepted_legacy = await verifier.verify_token("legacy-secret")
+        accepted_pair = await verifier.verify_token("pair-secret")
+        rejected = await verifier.verify_token("wrong")
+        return accepted_legacy, accepted_pair, rejected
+
+    accepted_legacy, accepted_pair, rejected = asyncio.run(check())
+
+    assert accepted_legacy is not None
+    assert accepted_pair is not None
+    assert accepted_pair.client_id == "hermes-peer"
+    assert rejected is None
+
+
+def test_create_server_with_auth_token():
+    module = load_proxy_module()
+
+    server = module._create_delegate_only_server(host="0.0.0.0", port=18084, auth_token="secret")
+
+    assert server is not None
+
+
+def test_peer_thread_key_is_per_peer_and_conversation(monkeypatch):
+    module = load_proxy_module()
+    monkeypatch.setattr(module, "LOCAL_PEER_ID", "windows")
+
+    key_a = module._peer_thread_key("quest3", "topic-a")
+    key_b = module._peer_thread_key("quest3", "topic-b")
+    key_c = module._peer_thread_key("android2", "topic-a")
+
+    assert key_a.startswith("peer:windows:to:quest3:")
+    assert key_a != key_b
+    assert key_a != key_c
+
+
+def test_peer_delegate_start_forwards_per_peer_thread_key(monkeypatch):
+    module = load_proxy_module()
+    calls = []
+
+    def fake_peer_call(peer_id, tool_name, arguments):
+        calls.append((peer_id, tool_name, arguments))
+        return {"task_id": "remote-task", "status": "running"}
+
+    monkeypatch.setattr(module, "LOCAL_PEER_ID", "windows")
+    monkeypatch.setattr(module, "_peer_call", fake_peer_call)
+
+    result = module._peer_delegate_start(
+        "quest3",
+        "hello",
+        timeout_seconds=120,
+        max_turns=5,
+        conversation_key="shared-topic",
+        hard_timeout_seconds=7200,
+    )
+
+    assert result["task_id"] == "remote-task"
+    peer_id, tool_name, arguments = calls[0]
+    assert peer_id == "quest3"
+    assert tool_name == "bridge_agent_delegate_start"
+    assert not tool_name.startswith("windows_agent_")
+    assert arguments["prompt"] == "hello"
+    assert arguments["timeout_seconds"] == 120
+    assert arguments["hard_timeout_seconds"] == 7200
+    assert arguments["max_turns"] == 5
+    assert arguments["caller"] == "windows"
+    assert arguments["a0_thread_key"].startswith("peer:windows:to:quest3:")
