@@ -50,6 +50,7 @@ def _default_hermes_exe(home: Path, agent: Path) -> Path:
 HERMES_HOME = _default_hermes_home()
 HERMES_AGENT = _default_hermes_agent(HERMES_HOME)
 HERMES_EXE = _default_hermes_exe(HERMES_HOME, HERMES_AGENT)
+BRIDGE_VERSION = "v1.2.7"
 DEFAULT_CWD = Path.home()
 BRIDGE_STATE_DIR = Path(os.environ.get("HERMES_BRIDGE_STATE_DIR", str(HERMES_HOME / "bridge-state"))).expanduser()
 BRIDGE_STATE_FILE = Path(
@@ -100,7 +101,6 @@ try:  # noqa: E402
 except ImportError:  # pragma: no cover
     from mcp.client.streamable_http import streamablehttp_client as _streamable_http_client  # type: ignore # noqa: E402
 from mcp.server.auth.provider import AccessToken, TokenVerifier  # noqa: E402
-from mcp.server.auth.settings import AuthSettings  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 
@@ -114,6 +114,53 @@ class _SharedTokenVerifier(TokenVerifier):
         if token not in self._tokens:
             return None
         return AccessToken(token=token, client_id="hermes-peer", scopes=["hermes-bridge"])
+
+
+class _BearerTokenMiddleware:
+    def __init__(self, app: Any, tokens: list[str], path: str):
+        self.app = app
+        self.tokens = {token for token in tokens if token}
+        self.path = path
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http" or scope.get("path") != self.path:
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        auth_header = headers.get("authorization", "")
+        scheme, _, token = auth_header.partition(" ")
+        if scheme.lower() == "bearer" and token in self.tokens:
+            await self.app(scope, receive, send)
+            return
+
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"text/plain; charset=utf-8"),
+                (b"www-authenticate", b"Bearer"),
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": b"Unauthorized",
+        })
+
+
+class _BearerOnlyFastMCP(FastMCP):
+    def __init__(self, *args: Any, bearer_tokens: Optional[list[str]] = None, **kwargs: Any):
+        self._bridge_bearer_tokens = [token for token in (bearer_tokens or []) if token]
+        super().__init__(*args, **kwargs)
+
+    def streamable_http_app(self):
+        app = super().streamable_http_app()
+        if self._bridge_bearer_tokens:
+            return _BearerTokenMiddleware(app, self._bridge_bearer_tokens, self.settings.streamable_http_path)
+        return app
 
 
 def _json(data: dict) -> str:
@@ -777,10 +824,11 @@ def add_bridge_tools(mcp):
 
         Direct delegation does not require Telegram or Hermes Gateway.
         """
-        version = _run_hidden([str(HERMES_EXE), "--version"], cwd=HERMES_AGENT, timeout_seconds=30)
+        hermes_version = _run_hidden([str(HERMES_EXE), "--version"], cwd=HERMES_AGENT, timeout_seconds=30)
         config_path = _run_hidden([str(HERMES_EXE), "config", "path"], cwd=HERMES_AGENT, timeout_seconds=30)
         state = _load_state()
         return _json({
+            "bridge_version": BRIDGE_VERSION,
             "hermes_exe": str(HERMES_EXE),
             "hermes_home": str(HERMES_HOME),
             "hermes_agent": str(HERMES_AGENT),
@@ -798,7 +846,7 @@ def add_bridge_tools(mcp):
             "delegate_transport": "local hermes chat subprocess via Hermes Bridge",
             "tracked_a0_threads": len(state.get("sessions", {})),
             "tracked_tasks": len(state.get("tasks", {})),
-            "version": version,
+            "hermes_version": hermes_version,
             "config_path": config_path,
         })
 
@@ -1042,12 +1090,7 @@ def _create_delegate_only_server(
     auth_token: Optional[str] = None,
 ) -> "FastMCP":
     tokens = _auth_tokens(auth_token)
-    token_verifier = _SharedTokenVerifier(tokens) if tokens else None
-    auth = None
-    if tokens:
-        resource_url = f"http://localhost:{port}"
-        auth = AuthSettings(issuer_url=resource_url, resource_server_url=resource_url, required_scopes=["hermes-bridge"])
-    return FastMCP(
+    return _BearerOnlyFastMCP(
         "hermes-bridge",
         instructions=(
             "Direct agents to the local Hermes Bridge agent. Use "
@@ -1063,8 +1106,8 @@ def _create_delegate_only_server(
         host=host,
         port=port,
         streamable_http_path="/mcp",
-        token_verifier=token_verifier,
-        auth=auth,
+        auth=None,
+        bearer_tokens=tokens,
     )
 
 

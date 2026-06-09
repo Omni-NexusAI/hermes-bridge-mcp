@@ -1,5 +1,7 @@
 # Android / Quest Hermes Peer Bridge Setup
 
+Target Hermes Bridge MCP version: `v1.2.7`.
+
 This setup is for Android-compatible Hermes peers, with Quest 3 as the first
 test device. It runs the bridge directly with the Python MCP SDK and does not
 require Node.js or `supergateway`.
@@ -10,7 +12,7 @@ require Node.js or `supergateway`.
 pkg install python git
 git clone https://github.com/Omni-NexusAI/hermes-bridge-mcp.git
 cd hermes-bridge-mcp
-git checkout codex/over-network-a2a-android-support
+git checkout development
 python -m pip install -r requirements-android.txt
 ```
 
@@ -53,6 +55,10 @@ From the Windows peer, call:
 bridge_peer_status(peer_id="quest3")
 ```
 
+The returned status should include `bridge_version: "v1.2.7"` and a generic
+Android platform value. The unique device identity should come from `peer_id`,
+not from a device-specific tool surface.
+
 Then start a remote task:
 
 ```text
@@ -68,6 +74,9 @@ From the Quest peer, call the reverse direction:
 ```text
 bridge_peer_status(peer_id="windows")
 ```
+
+The returned status should include `bridge_version: "v1.2.7"` and a generic
+Windows platform value.
 
 Then:
 

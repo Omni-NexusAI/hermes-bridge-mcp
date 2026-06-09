@@ -1,5 +1,6 @@
 import importlib.util
 import asyncio
+import json
 import sys
 import types
 import time
@@ -20,6 +21,15 @@ def load_proxy_module():
     return module
 
 
+def load_a0_config_module():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "configure-a0-mcp.py"
+    spec = importlib.util.spec_from_file_location("configure_a0_mcp_test", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_bridge_does_not_import_hermes_messaging_server():
     path = Path(__file__).resolve().parents[1] / "bin" / "windows-hermes-proxy-mcp.py"
     source = path.read_text(encoding="utf-8")
@@ -27,6 +37,23 @@ def test_bridge_does_not_import_hermes_messaging_server():
     assert "from mcp_serve import" not in source
     assert "create_mcp_server" not in source
     assert "EventBridge" not in source
+
+
+def test_a0_config_helper_uses_universal_bridge_settings():
+    module = load_a0_config_module()
+    settings = {}
+
+    updated, changed = module.configure(settings, "hermes-bridge", "http://host.docker.internal:18082/mcp")
+    servers = json.loads(updated["mcp_servers"])["mcpServers"]
+    entry = servers["hermes-bridge"]
+
+    assert changed is True
+    assert entry["type"] == "streamable-http"
+    assert entry["url"] == "http://host.docker.internal:18082/mcp"
+    assert entry["timeout"] == 900
+    assert entry["tool_timeout"] == 900
+    assert "messenger gateway" in entry["description"]
+    assert "windows-hermes" not in servers
 
 
 def test_messaging_gateway_artifacts_are_not_shipped():
@@ -195,6 +222,20 @@ def test_delegate_only_server_does_not_expose_messaging_tools():
 
     names = asyncio.run(collect_names())
 
+    assert names == {
+        "bridge_agent_status",
+        "bridge_agent_delegate",
+        "bridge_agent_delegate_start",
+        "bridge_agent_delegate_status",
+        "bridge_agent_delegate_result",
+        "bridge_agent_delegate_cancel",
+        "bridge_peer_status",
+        "bridge_peer_delegate_start",
+        "bridge_peer_delegate_status",
+        "bridge_peer_delegate_result",
+        "bridge_peer_delegate_cancel",
+    }
+    assert len(names) == 11
     assert "messages_send" not in names
     assert "conversations_list" not in names
     assert "bridge_agent_delegate_start" in names
@@ -218,6 +259,26 @@ def test_legacy_windows_tools_are_opt_in(monkeypatch):
     assert "bridge_agent_delegate_start" in names
     assert "windows_agent_delegate_start" in names
     assert "windows_agent_status" in names
+
+
+def test_bridge_agent_status_reports_bridge_version(monkeypatch):
+    module = load_proxy_module()
+    monkeypatch.setattr(module, "_run_hidden", lambda *args, **kwargs: "hermes-runtime")
+    monkeypatch.setattr(module, "_load_state", lambda: {"sessions": {}, "tasks": {}})
+    monkeypatch.setattr(module, "_configured_peer_ids", lambda: [])
+    server = module._create_delegate_only_server()
+    module.add_bridge_tools(server)
+
+    async def call_status():
+        content, _ = await server.call_tool("bridge_agent_status", {})
+        return json.loads(content[0].text)
+
+    status = asyncio.run(call_status())
+
+    assert module.BRIDGE_VERSION == "v1.2.7"
+    assert status["bridge_version"] == "v1.2.7"
+    assert status["hermes_version"] == "hermes-runtime"
+    assert "version" not in status
 
 
 def test_cross_platform_home_prefers_env(monkeypatch, tmp_path):
@@ -379,6 +440,44 @@ def test_create_server_with_auth_token():
     server = module._create_delegate_only_server(host="0.0.0.0", port=18084, auth_token="secret")
 
     assert server is not None
+    assert server.settings.auth is None
+    assert server._token_verifier is None
+    assert server._bridge_bearer_tokens == ["secret"]
+
+
+def test_bearer_token_middleware_enforces_shared_token():
+    module = load_proxy_module()
+    calls = []
+
+    async def app(scope, receive, send):
+        calls.append(scope)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def invoke(headers):
+        sent = []
+        async def send(message):
+            sent.append(message)
+
+        middleware = module._BearerTokenMiddleware(app, ["secret"], "/mcp")
+        await middleware(
+            {
+                "type": "http",
+                "path": "/mcp",
+                "headers": headers,
+            },
+            None,
+            send,
+        )
+        return sent
+
+    accepted = asyncio.run(invoke([(b"authorization", b"Bearer secret")]))
+    rejected = asyncio.run(invoke([(b"authorization", b"Bearer wrong")]))
+    missing = asyncio.run(invoke([]))
+
+    assert accepted[0]["status"] == 200
+    assert rejected[0]["status"] == 401
+    assert missing[0]["status"] == 401
 
 
 def test_peer_thread_key_is_per_peer_and_conversation(monkeypatch):

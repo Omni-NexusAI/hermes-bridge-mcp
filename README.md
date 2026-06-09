@@ -1,5 +1,7 @@
 # Hermes Bridge MCP
 
+Current bridge version: `v1.2.7`.
+
 Bridge one Hermes agent to another Hermes agent through MCP.
 
 Hermes Bridge MCP exposes direct delegation tools so a Docker-hosted agent such
@@ -102,6 +104,9 @@ use the same pair key for the simplest setup. For multi-peer setups, each peer
 entry can use a distinct `pair_key_env`. Legacy `HERMES_BRIDGE_AUTH_TOKEN`,
 `token`, and `token_env` values are still accepted for existing installs.
 
+Peer mode uses shared bearer-token authentication only in `v1.2.7`. OAuth-based
+peer discovery is deferred until manual pairing is stable.
+
 ## Requirements
 
 - A local Hermes install available to the bridge runtime
@@ -122,6 +127,13 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 The installer copies scripts into `%LOCALAPPDATA%\hermes\bin`, creates hidden
 Startup launchers, and can restart the bridge.
+
+If the A0 `settings.json` file is available from Windows, the installer can add
+or update the `hermes-bridge` MCP entry:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -A0SettingsPath C:\path\to\settings.json
+```
 
 ## Docker Hermes Config
 
@@ -155,6 +167,25 @@ bridge_agent_delegate_start
 bridge_peer_status
 ```
 
+By default, the bridge exposes exactly 11 tools:
+
+```text
+bridge_agent_status
+bridge_agent_delegate
+bridge_agent_delegate_start
+bridge_agent_delegate_status
+bridge_agent_delegate_result
+bridge_agent_delegate_cancel
+bridge_peer_status
+bridge_peer_delegate_start
+bridge_peer_delegate_status
+bridge_peer_delegate_result
+bridge_peer_delegate_cancel
+```
+
+`bridge_agent_status` should report `bridge_version` as `v1.2.7` on every
+platform. It reports the local Hermes runtime separately as `hermes_version`.
+
 You can also test the proxy directly:
 
 ```python
@@ -185,6 +216,7 @@ asyncio.run(main())
 - `bin/start-windows-hermes-bridge*.ps1` - Windows-specific A0 bridge launchers
 - `bin/start-android-hermes-peer-bridge.sh` - Android/Termux-specific peer launcher implementation
 - `bin/windows-hermes-bridge-background-watchdog.ps1` - Windows-specific bridge watchdog
+- `scripts/configure-a0-mcp.py` - backup-first A0 MCP settings helper
 - `config/*.example.*` - peer config and env templates
 - `docs/quest-android-setup.md` - Android/Quest setup checklist
 - `startup/*.vbs` - hidden Startup-folder launchers
