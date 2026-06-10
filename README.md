@@ -33,6 +33,16 @@ Legacy `windows_agent_*` aliases are hidden by default. Set
 `HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS=1` only for older bridge clients that
 still call those names.
 
+## Which Tool Family To Use
+
+Use `bridge_agent_*` only for the local Hermes agent running on the same bridge
+endpoint. Do not use `bridge_agent_*` to reach a different machine, headset,
+phone, or LAN device.
+
+Use `bridge_peer_*` for another configured Hermes Bridge peer on the network.
+These tools require `peer_id`; call `bridge_agent_status` first and inspect
+`configured_peers`, `peers`, and `tool_routing` if the peer ID is unknown.
+
 `bridge_agent_delegate` runs the task through the local Hermes Bridge agent:
 
 ```text
@@ -97,6 +107,11 @@ Peer tools:
 - `bridge_peer_delegate_status(peer_id, task_id)`
 - `bridge_peer_delegate_result(peer_id, task_id)`
 - `bridge_peer_delegate_cancel(peer_id, task_id)`
+
+The peer tools internally call the remote peer's `bridge_agent_*` tools over
+Streamable HTTP using the URL and bearer token from `peers.json`. Agents should
+use the peer tools rather than hand-writing JSON-RPC unless diagnosing a broken
+MCP client session.
 
 LAN-facing peer bridge startup requires `HERMES_BRIDGE_PAIR_KEY` unless
 explicitly run with the unsafe development override. Both paired agents should
@@ -185,6 +200,7 @@ bridge_peer_delegate_cancel
 
 `bridge_agent_status` should report `bridge_version` as `v1.2.7` on every
 platform. It reports the local Hermes runtime separately as `hermes_version`.
+It also reports sanitized peer routing diagnostics without exposing token values.
 
 You can also test the proxy directly:
 
@@ -228,3 +244,5 @@ asyncio.run(main())
 - New installs should use the MCP server name `hermes-bridge`. Existing
   `windows-hermes` endpoint names can remain as legacy configuration aliases.
 - Delegated tasks use the local Hermes agent's normal approval policy.
+- `scripts/smoke_peer_bridge.py` is a diagnostic probe for a remote `/mcp`
+  endpoint. It is not the normal agent workflow; prefer `bridge_peer_*`.
