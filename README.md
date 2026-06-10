@@ -202,6 +202,19 @@ bridge_peer_delegate_cancel
 platform. It reports the local Hermes runtime separately as `hermes_version`.
 It also reports sanitized peer routing diagnostics without exposing token values.
 
+## Compatibility Policy
+
+Starting with `v1.2.7`, Hermes Bridge MCP versions must remain backward
+compatible with the default `bridge_agent_*` and `bridge_peer_*` tool contract
+unless a future release explicitly declares a breaking bridge version. New
+versions may add optional fields or tools, but they should not remove or rename
+the 11 default tools, change their core argument meanings, or require all peers
+to update at once for normal local and peer delegation.
+
+`bridge_agent_status` exposes `min_compatible_bridge_version`,
+`compatibility_policy`, and `public_tool_contract` so agents can verify whether a
+peer is compatible before delegation.
+
 You can also test the proxy directly:
 
 ```python

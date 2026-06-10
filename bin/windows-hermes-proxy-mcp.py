@@ -51,6 +51,20 @@ HERMES_HOME = _default_hermes_home()
 HERMES_AGENT = _default_hermes_agent(HERMES_HOME)
 HERMES_EXE = _default_hermes_exe(HERMES_HOME, HERMES_AGENT)
 BRIDGE_VERSION = "v1.2.7"
+MIN_COMPATIBLE_BRIDGE_VERSION = "v1.2.7"
+DEFAULT_PUBLIC_TOOLS = (
+    "bridge_agent_status",
+    "bridge_agent_delegate",
+    "bridge_agent_delegate_start",
+    "bridge_agent_delegate_status",
+    "bridge_agent_delegate_result",
+    "bridge_agent_delegate_cancel",
+    "bridge_peer_status",
+    "bridge_peer_delegate_start",
+    "bridge_peer_delegate_status",
+    "bridge_peer_delegate_result",
+    "bridge_peer_delegate_cancel",
+)
 DEFAULT_CWD = Path.home()
 BRIDGE_STATE_DIR = Path(os.environ.get("HERMES_BRIDGE_STATE_DIR", str(HERMES_HOME / "bridge-state"))).expanduser()
 BRIDGE_STATE_FILE = Path(
@@ -886,6 +900,8 @@ def add_bridge_tools(mcp):
         configured_peer_ids = [peer["peer_id"] for peer in peers if peer.get("peer_id")]
         return _json({
             "bridge_version": BRIDGE_VERSION,
+            "min_compatible_bridge_version": MIN_COMPATIBLE_BRIDGE_VERSION,
+            "compatibility_policy": "Versions >= v1.2.7 preserve the default bridge_agent_* and bridge_peer_* tool contract unless a future breaking bridge version is explicitly declared.",
             "hermes_exe": str(HERMES_EXE),
             "hermes_home": str(HERMES_HOME),
             "hermes_agent": str(HERMES_AGENT),
@@ -901,6 +917,12 @@ def add_bridge_tools(mcp):
                 "network_peer_tools": "bridge_peer_*",
                 "rule": "Use bridge_agent_* only for the local Hermes agent on this same bridge endpoint. Use bridge_peer_* with peer_id for any other configured machine or device on the network.",
                 "peer_discovery": "Call bridge_agent_status to inspect configured_peers before using bridge_peer_*.",
+            },
+            "public_tool_contract": {
+                "default_tool_count": len(DEFAULT_PUBLIC_TOOLS),
+                "default_tools": list(DEFAULT_PUBLIC_TOOLS),
+                "legacy_windows_tools_env": "HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS",
+                "stable_since": MIN_COMPATIBLE_BRIDGE_VERSION,
             },
             "pair_key_configured": bool(_configured_pair_key()),
             "legacy_auth_token_configured": bool(_env_value("HERMES_BRIDGE_AUTH_TOKEN")),

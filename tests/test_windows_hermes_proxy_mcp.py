@@ -222,19 +222,7 @@ def test_delegate_only_server_does_not_expose_messaging_tools():
 
     names = asyncio.run(collect_names())
 
-    assert names == {
-        "bridge_agent_status",
-        "bridge_agent_delegate",
-        "bridge_agent_delegate_start",
-        "bridge_agent_delegate_status",
-        "bridge_agent_delegate_result",
-        "bridge_agent_delegate_cancel",
-        "bridge_peer_status",
-        "bridge_peer_delegate_start",
-        "bridge_peer_delegate_status",
-        "bridge_peer_delegate_result",
-        "bridge_peer_delegate_cancel",
-    }
+    assert names == set(module.DEFAULT_PUBLIC_TOOLS)
     assert len(names) == 11
     assert "messages_send" not in names
     assert "conversations_list" not in names
@@ -314,7 +302,10 @@ def test_bridge_agent_status_reports_bridge_version(monkeypatch):
     status = asyncio.run(call_status())
 
     assert module.BRIDGE_VERSION == "v1.2.7"
+    assert module.MIN_COMPATIBLE_BRIDGE_VERSION == "v1.2.7"
     assert status["bridge_version"] == "v1.2.7"
+    assert status["min_compatible_bridge_version"] == "v1.2.7"
+    assert "Versions >= v1.2.7" in status["compatibility_policy"]
     assert status["hermes_version"] == "hermes-runtime"
     assert "version" not in status
     assert status["configured_peers"] == ["quest3"]
@@ -324,6 +315,9 @@ def test_bridge_agent_status_reports_bridge_version(monkeypatch):
     assert status["tool_routing"]["local_tools"] == "bridge_agent_*"
     assert status["tool_routing"]["network_peer_tools"] == "bridge_peer_*"
     assert "Use bridge_agent_* only for the local Hermes agent" in status["tool_routing"]["rule"]
+    assert status["public_tool_contract"]["default_tool_count"] == 11
+    assert status["public_tool_contract"]["default_tools"] == list(module.DEFAULT_PUBLIC_TOOLS)
+    assert status["public_tool_contract"]["stable_since"] == "v1.2.7"
 
 
 def test_cross_platform_home_prefers_env(monkeypatch, tmp_path):
