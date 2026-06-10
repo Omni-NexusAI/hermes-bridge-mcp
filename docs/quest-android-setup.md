@@ -49,6 +49,11 @@ http://QUEST_LAN_IP:18084/mcp
 
 ## First Smoke Tests
 
+Use `bridge_peer_*` when one device asks another configured device to work.
+Use `bridge_agent_*` only when asking the local Hermes agent on the same bridge
+endpoint to work. If the peer ID is unclear, call `bridge_agent_status` and read
+`configured_peers`, `peers`, and `tool_routing`.
+
 From the Windows peer, call:
 
 ```text
