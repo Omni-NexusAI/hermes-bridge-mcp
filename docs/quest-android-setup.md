@@ -1,6 +1,6 @@
 # Android / Quest Hermes Peer Bridge Setup
 
-Target Hermes Bridge MCP version: `v1.2.7`.
+Target Hermes Bridge MCP version: `v1.3.0`.
 
 This setup is for Android-compatible Hermes peers, with Quest 3 as the first
 test device. It runs the bridge directly with the Python MCP SDK and does not
@@ -34,6 +34,11 @@ Edit `config/android-peer.env` and `~/.hermes/bridge-state/peers.json`:
 For more than one paired agent, keep multiple peer records in `peers.json`.
 Each record can use the shared `HERMES_BRIDGE_PAIR_KEY`, or a distinct
 `pair_key_env` if you want separate secrets per peer later.
+
+For automatic discovery on an unpaired test device, set
+`HERMES_BRIDGE_AUTO_DISCOVERY=1`. Do not enable this release candidate on an
+existing paired device yet. Automatic peers use HTTPS port `18443`; legacy
+shared-key peers remain on HTTP port `18084`.
 
 ## Run
 

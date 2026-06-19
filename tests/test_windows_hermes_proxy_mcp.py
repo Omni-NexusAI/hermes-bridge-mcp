@@ -222,14 +222,42 @@ def test_delegate_only_server_does_not_expose_messaging_tools():
 
     names = asyncio.run(collect_names())
 
-    assert names == set(module.DEFAULT_PUBLIC_TOOLS)
-    assert len(names) == 11
+    assert set(module.DEFAULT_PUBLIC_TOOLS).issubset(names)
+    assert len(module.DEFAULT_PUBLIC_TOOLS) == 11
+    assert set(module.NETWORK_EXTENSION_TOOLS).issubset(names)
     assert "messages_send" not in names
     assert "conversations_list" not in names
     assert "bridge_agent_delegate_start" in names
     assert "windows_agent_delegate_start" not in names
     assert "bridge_peer_delegate_start" in names
     assert "bridge_peer_status" in names
+
+
+def test_v127_core_tool_argument_contract_is_unchanged():
+    module = load_proxy_module()
+    server = module._create_delegate_only_server()
+    module.add_bridge_tools(server)
+
+    async def collect_schemas():
+        tools = await server.list_tools()
+        return {tool.name: tool.inputSchema for tool in tools}
+
+    schemas = asyncio.run(collect_schemas())
+    expected_properties = {
+        "bridge_agent_status": set(),
+        "bridge_agent_delegate": {"prompt", "cwd", "timeout_seconds", "max_turns", "a0_thread_key", "caller", "kill_on_timeout", "hard_timeout_seconds"},
+        "bridge_agent_delegate_start": {"prompt", "cwd", "timeout_seconds", "max_turns", "a0_thread_key", "caller", "hard_timeout_seconds"},
+        "bridge_agent_delegate_status": {"task_id"},
+        "bridge_agent_delegate_result": {"task_id"},
+        "bridge_agent_delegate_cancel": {"task_id"},
+        "bridge_peer_status": {"peer_id"},
+        "bridge_peer_delegate_start": {"peer_id", "prompt", "cwd", "timeout_seconds", "max_turns", "conversation_key", "hard_timeout_seconds"},
+        "bridge_peer_delegate_status": {"peer_id", "task_id"},
+        "bridge_peer_delegate_result": {"peer_id", "task_id"},
+        "bridge_peer_delegate_cancel": {"peer_id", "task_id"},
+    }
+    for tool_name, properties in expected_properties.items():
+        assert set(schemas[tool_name].get("properties", {})) == properties
 
 
 def test_tool_descriptions_explain_local_vs_network_routing():
@@ -301,9 +329,9 @@ def test_bridge_agent_status_reports_bridge_version(monkeypatch):
 
     status = asyncio.run(call_status())
 
-    assert module.BRIDGE_VERSION == "v1.2.7"
+    assert module.BRIDGE_VERSION == "v1.3.0"
     assert module.MIN_COMPATIBLE_BRIDGE_VERSION == "v1.2.7"
-    assert status["bridge_version"] == "v1.2.7"
+    assert status["bridge_version"] == "v1.3.0"
     assert status["min_compatible_bridge_version"] == "v1.2.7"
     assert "Versions >= v1.2.7" in status["compatibility_policy"]
     assert status["hermes_version"] == "hermes-runtime"
