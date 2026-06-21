@@ -1365,7 +1365,10 @@ def main() -> None:
                 backend = os.environ.get("HERMES_BRIDGE_DISCOVERY_BACKEND", "mdns")
                 if backend == "mdns":
                     discovery = MdnsDiscovery(manager, args.host, args.port)
-                    discovery.start()
+                    # Run mDNS registration in a worker thread so zeroconf manages
+                    # its own event loop. Calling register_service() synchronously
+                    # from inside this running asyncio loop deadlocks (EventLoopBlocked).
+                    await asyncio.to_thread(discovery.start)
                 elif backend == "memory":
                     discovery = InMemoryDiscovery(manager)
                 else:
