@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 from cryptography import x509
@@ -34,6 +34,9 @@ PRODUCTION_PORTS = {18082, 18083, 18084, 18443}
 DEFAULT_SECURE_PORT = 18443
 DEFAULT_TAILSCALE_TAG = "tag:hermes-bridge"
 DEFAULT_TAILSCALE_SCAN_INTERVAL = 30.0
+DEFAULT_TAILSCALE_PROVIDER = "auto"
+DEFAULT_TAILSCALE_API_BASE = "https://api.tailscale.com/api/v2"
+MAX_TAILSCALE_DISCOVERY_PEERS = 64
 TAILSCALE_IPV4_RANGE = ipaddress.ip_network("100.64.0.0/10")
 TAILSCALE_CHROMEOS_RANGE = ipaddress.ip_network("100.115.92.0/23")
 TAILSCALE_IPV6_RANGE = ipaddress.ip_network("fd7a:115c:a1e0::/48")
@@ -575,9 +578,9 @@ class NetworkManager:
             for peer_id, peer in self.state.snapshot()["peers"].items()
         }
 
-    def inspect_identity(self, url: str) -> dict[str, Any]:
+    def inspect_identity(self, url: str, timeout: float = 10.0) -> dict[str, Any]:
         base = _validate_peer_url(url).rsplit("/mcp", 1)[0]
-        with httpx.Client(verify=False, timeout=10.0, trust_env=False) as client:
+        with httpx.Client(verify=False, timeout=timeout, trust_env=False) as client:
             response = client.get(f"{base}/bridge/v1/identity")
             response.raise_for_status()
             document = response.json()
@@ -936,8 +939,10 @@ class NetworkASGI:
             source = ipaddress.ip_address(address)
         except ValueError as exc:
             raise ValueError("pairing source address is invalid") from exc
+        tailscale_source = _is_tailscale_ip(source)
         tailscale_enabled = os.environ.get("HERMES_BRIDGE_DISCOVERY_BACKEND", "mdns") == "tailscale"
-        if not (source.is_private or source.is_link_local or source.is_loopback or (tailscale_enabled and _is_tailscale_ip(source))):
+        local_source = (source.is_private or source.is_link_local or source.is_loopback) and not tailscale_source
+        if not (local_source or (tailscale_enabled and tailscale_source)):
             raise ValueError("pairing requests are accepted only from local-network addresses")
         now = _now()
         with self._rate_lock:
@@ -977,7 +982,7 @@ class InMemoryDiscovery:
 
 
 class TailscaleDiscovery:
-    """Discovers explicitly tagged bridge nodes from the local Tailscale daemon."""
+    """Discovers explicitly tagged bridge nodes from Tailscale CLI or HTTP API inventory."""
 
     def __init__(
         self,
@@ -985,24 +990,37 @@ class TailscaleDiscovery:
         port: int,
         command_runner: Optional[Callable[[list[str], float], Any]] = None,
         identity_fetcher: Optional[Callable[[str], dict[str, Any]]] = None,
+        api_fetcher: Optional[Callable[[str, str, float], dict[str, Any]]] = None,
     ):
         self.manager = manager
         self.port = int(port)
         self.cli = os.environ.get("HERMES_BRIDGE_TAILSCALE_CLI", "tailscale")
+        self.provider = os.environ.get("HERMES_BRIDGE_TAILSCALE_PROVIDER", DEFAULT_TAILSCALE_PROVIDER).strip().lower()
         self.tag = os.environ.get("HERMES_BRIDGE_TAILSCALE_TAG", DEFAULT_TAILSCALE_TAG).strip()
-        configured_interval = float(os.environ.get("HERMES_BRIDGE_TAILSCALE_SCAN_INTERVAL", DEFAULT_TAILSCALE_SCAN_INTERVAL))
+        self.api_token = os.environ.get("HERMES_BRIDGE_TAILSCALE_API_TOKEN", "").strip()
+        self.tailnet = os.environ.get("HERMES_BRIDGE_TAILNET", "").strip()
+        self.api_base = os.environ.get("HERMES_BRIDGE_TAILSCALE_API_BASE", DEFAULT_TAILSCALE_API_BASE).strip().rstrip("/")
+        try:
+            configured_interval = float(
+                os.environ.get("HERMES_BRIDGE_TAILSCALE_SCAN_INTERVAL", DEFAULT_TAILSCALE_SCAN_INTERVAL)
+            )
+        except ValueError:
+            configured_interval = DEFAULT_TAILSCALE_SCAN_INTERVAL
         self.interval_seconds = min(max(configured_interval, 10.0), 300.0)
         self.command_runner = command_runner or self._run_status_command
-        self.identity_fetcher = identity_fetcher or manager.inspect_identity
+        self.api_fetcher = api_fetcher or self._run_api_request
+        self.identity_fetcher = identity_fetcher or (lambda url: manager.inspect_identity(url, timeout=3.0))
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self._health_lock = threading.Lock()
         self._health: dict[str, Any] = {
             "backend": "tailscale",
+            "provider": self.provider,
             "status": "stopped",
             "scan_interval_seconds": self.interval_seconds,
             "eligible_peer_count": 0,
             "candidate_count": 0,
+            "probe_failure_count": 0,
             "last_scan_at": None,
             "last_success_at": None,
             "last_error": None,
@@ -1021,7 +1039,63 @@ class TailscaleDiscovery:
     def _run_status_command(self, command: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
         return subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False, shell=False)
 
-    def _load_status(self) -> dict[str, Any]:
+    @staticmethod
+    def _timestamp_expired(value: Any) -> bool:
+        if not value:
+            return False
+        try:
+            text = str(value).replace("Z", "+00:00")
+            return datetime.fromisoformat(text).timestamp() < _now()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _device_values(device: dict[str, Any], *names: str) -> list[Any]:
+        for name in names:
+            value = device.get(name)
+            if isinstance(value, list):
+                return value
+        return []
+
+    @staticmethod
+    def _device_name_tokens(device: dict[str, Any]) -> set[str]:
+        values = {
+            str(device.get("hostname") or ""),
+            str(device.get("name") or ""),
+            str(device.get("dnsName") or ""),
+        }
+        tokens: set[str] = set()
+        for value in values:
+            lowered = value.strip().strip(".").lower()
+            if lowered:
+                tokens.add(lowered)
+                tokens.add(lowered.split(".", 1)[0])
+        return tokens
+
+    def _local_name_tokens(self) -> set[str]:
+        values = {
+            platform.node(),
+            self.manager.identity.display_name,
+            self.manager.identity.peer_id,
+            os.environ.get("HERMES_BRIDGE_DISPLAY_NAME", ""),
+            os.environ.get("HERMES_BRIDGE_PEER_ID", ""),
+        }
+        return {str(value).strip().lower() for value in values if str(value).strip()}
+
+    def _api_configured(self) -> bool:
+        return bool(self.api_token and self.tailnet)
+
+    def _run_api_request(self, url: str, token: str, timeout: float) -> dict[str, Any]:
+        with httpx.Client(auth=(token, ""), timeout=timeout, trust_env=False) as client:
+            response = client.get(url, headers={"accept": "application/json"})
+            if response.status_code in {401, 403}:
+                raise RuntimeError("tailscale_api_unauthorized")
+            if response.status_code == 404:
+                raise RuntimeError("tailscale_tailnet_not_found")
+            response.raise_for_status()
+            return response.json()
+
+    def _load_cli_status(self) -> dict[str, Any]:
         result = self.command_runner([self.cli, "status", "--json"], 10.0)
         if int(getattr(result, "returncode", 1)) != 0:
             raise RuntimeError("Tailscale status command failed")
@@ -1034,6 +1108,71 @@ class TailscaleDiscovery:
         if status.get("BackendState") != "Running":
             raise RuntimeError("Tailscale is not running")
         return status
+
+    def _api_url(self) -> str:
+        parsed = urlparse(self.api_base)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise RuntimeError("tailscale_api_base_invalid")
+        query = urlencode({"fields": "addresses,tags,hostname,name,dnsName,os,lastSeen,expires,online,authorized"})
+        return f"{self.api_base}/tailnet/{quote(self.tailnet, safe='')}/devices?{query}"
+
+    def _api_device_to_peer(self, device: dict[str, Any]) -> dict[str, Any]:
+        addresses = self._device_values(device, "addresses", "tailnetIPs", "TailscaleIPs")
+        tags = self._device_values(device, "tags", "Tags")
+        online = device.get("online", device.get("Online", True))
+        return {
+            "Online": online is not False,
+            "Expired": bool(device.get("expired") or device.get("Expired")) or self._timestamp_expired(device.get("expires")),
+            "Tags": [str(tag) for tag in tags],
+            "TailscaleIPs": [str(address) for address in addresses],
+        }
+
+    def _load_api_status(self) -> dict[str, Any]:
+        if not self.api_token:
+            raise RuntimeError("tailscale_api_token_missing")
+        if not self.tailnet:
+            raise RuntimeError("tailscale_tailnet_missing")
+        try:
+            payload = self.api_fetcher(self._api_url(), self.api_token, 10.0)
+        except httpx.TimeoutException as exc:
+            raise RuntimeError("tailscale_api_timeout") from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError("tailscale_api_unavailable") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("tailscale_api_invalid_document")
+        devices = payload.get("devices")
+        if not isinstance(devices, list):
+            raise RuntimeError("tailscale_api_invalid_document")
+        local_names = self._local_name_tokens()
+        self_ips: list[str] = []
+        peers: list[dict[str, Any]] = []
+        for device in devices:
+            if not isinstance(device, dict):
+                continue
+            peer = self._api_device_to_peer(device)
+            if self._device_name_tokens(device) & local_names:
+                self_ips.extend(str(value).split("%", 1)[0] for value in peer["TailscaleIPs"] if _is_tailscale_ip(value))
+            peers.append(peer)
+        return {
+            "BackendState": "Running",
+            "TailscaleIPs": sorted(set(self_ips), key=lambda value: ipaddress.ip_address(value).version),
+            "Self": {"TailscaleIPs": sorted(set(self_ips), key=lambda value: ipaddress.ip_address(value).version)},
+            "Peer": peers,
+        }
+
+    def _load_inventory(self) -> tuple[dict[str, Any], str]:
+        if self.provider not in {"auto", "cli", "api"}:
+            raise RuntimeError("tailscale_provider_invalid")
+        if self.provider == "cli":
+            return self._load_cli_status(), "cli"
+        if self.provider == "api":
+            return self._load_api_status(), "api"
+        try:
+            return self._load_cli_status(), "cli"
+        except FileNotFoundError:
+            if self._api_configured():
+                return self._load_api_status(), "api"
+            raise
 
     @staticmethod
     def _self_ips(status: dict[str, Any]) -> set[str]:
@@ -1060,23 +1199,26 @@ class TailscaleDiscovery:
             if addresses:
                 addresses.sort(key=lambda value: ipaddress.ip_address(value).version)
                 eligible.append(addresses)
-        return eligible
+        return eligible[:MAX_TAILSCALE_DISCOVERY_PEERS]
 
     def scan_once(self) -> dict[str, Any]:
         scan_at = _now()
         try:
-            status = self._load_status()
+            status, provider = self._load_inventory()
             self_ips = sorted(self._self_ips(status), key=lambda value: ipaddress.ip_address(value).version)
             if self_ips and not os.environ.get("HERMES_BRIDGE_ADVERTISE_ADDRESS"):
                 self.manager.set_runtime_advertise_address(self_ips[0])
             eligible = self._eligible_addresses(status)
             candidates = 0
+            probe_failures = 0
             for addresses in eligible:
+                peer_reached = False
                 for address in addresses:
                     url = f"https://{_url_host(address)}:{self.port}/mcp"
                     try:
                         identity = self.identity_fetcher(url)
                         if identity.get("peer_id") == self.manager.identity.peer_id:
+                            peer_reached = True
                             break
                         candidate = {
                             "peer_id": identity.get("peer_id"),
@@ -1086,31 +1228,45 @@ class TailscaleDiscovery:
                             "platform": identity.get("platform"),
                             "bridge_version": identity.get("bridge_version"),
                             "protocol_version": identity.get("protocol_version"),
-                            "source": "tailscale",
+                            "source": "tailscale-api" if provider == "api" else "tailscale",
                         }
                         self.manager.state.ingest_candidate(candidate)
                         candidates += 1
+                        peer_reached = True
                         break
                     except Exception:
                         continue
+                if not peer_reached:
+                    probe_failures += 1
             with self._health_lock:
                 self._health.update({
-                    "status": "healthy",
+                    "provider": provider,
+                    "status": "degraded" if probe_failures else "healthy",
                     "eligible_peer_count": len(eligible),
                     "candidate_count": candidates,
+                    "probe_failure_count": probe_failures,
                     "last_scan_at": scan_at,
                     "last_success_at": _now(),
-                    "last_error": None,
+                    "last_error": "bridge_probe_unreachable" if probe_failures else None,
                 })
             return self.public_status()
         except Exception as exc:
+            if isinstance(exc, FileNotFoundError):
+                public_error = "tailscale_cli_unavailable"
+            elif isinstance(exc, subprocess.TimeoutExpired):
+                public_error = "tailscale_cli_timeout"
+            elif isinstance(exc, RuntimeError):
+                public_error = str(exc)
+            else:
+                public_error = "tailscale_discovery_error"
             with self._health_lock:
                 self._health.update({
                     "status": "degraded",
                     "eligible_peer_count": 0,
                     "candidate_count": 0,
+                    "probe_failure_count": 0,
                     "last_scan_at": scan_at,
-                    "last_error": f"{type(exc).__name__}: {exc}",
+                    "last_error": public_error,
                 })
             return self.public_status()
 
