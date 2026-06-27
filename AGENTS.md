@@ -8,7 +8,7 @@
 
 ## Isolation Contract
 
-- Repository development and automated tests must not read or write a real Hermes home, agent configuration, startup folder, container, or paired-device state.
+- Repository development and automated tests must not read or write a real Hermes home, agent configuration, startup folder, container, paired-device state, Tailscale daemon state, or Tailscale API/tailnet state.
 - Tests must use temporary `HOME`, `LOCALAPPDATA`, bridge state, identity, certificate, and log directories.
 - Tests must not use ports `18082`, `18083`, `18084`, or `18443`, invoke a real Hermes executable, or broadcast the production mDNS service.
 - Live installation, restart, container access, and device validation require separate explicit user authorization.
@@ -17,6 +17,7 @@
 
 - Base feature work on `development` and keep legacy static peer configuration functional.
 - Treat automatically discovered identities as untrusted until explicitly approved.
+- Treat Tailscale as a reachability layer, never as proof that a Hermes identity is trusted.
 - Never expose private keys, bearer credentials, or unredacted pairing records through tools or logs.
 - Use native `bridge_peer_*` tools as the normal remote-agent path; raw HTTP helpers remain diagnostics.
 
@@ -35,4 +36,3 @@
 
 - `bin/AGENTS.md` — bridge runtime, discovery, authentication, and launcher contracts.
 - `tests/AGENTS.md` — isolated test-environment and safety requirements.
-
