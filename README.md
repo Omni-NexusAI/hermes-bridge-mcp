@@ -102,6 +102,29 @@ fingerprint shown by the tool, approve once from either agent:
 bridge_peer_pair(action="approve", peer_id="candidate-id", expected_fingerprint="full-sha256-fingerprint")
 ```
 
+For peers on different networks, use the opt-in Tailscale backend instead of
+mDNS. It reads Tailscale inventory from the local CLI or, on passive/mobile
+environments, the Tailscale HTTP API. The backend probes only tagged nodes and
+presents validated bridge identities as the same untrusted candidates:
+
+```powershell
+$env:HERMES_BRIDGE_AUTO_DISCOVERY = "1"
+$env:HERMES_BRIDGE_DISCOVERY_BACKEND = "tailscale"
+$env:HERMES_BRIDGE_TAILSCALE_PROVIDER = "auto"
+powershell -ExecutionPolicy Bypass -File $env:LOCALAPPDATA\hermes\bin\start-hermes-bridge-peer.ps1
+```
+
+For Android or other environments without a local Tailscale CLI, set
+`HERMES_BRIDGE_TAILSCALE_PROVIDER=api`, `HERMES_BRIDGE_TAILSCALE_API_TOKEN`,
+and `HERMES_BRIDGE_TAILNET`. If the bridge cannot infer its own Tailscale
+address from API inventory, set `HERMES_BRIDGE_ADVERTISE_ADDRESS` to its
+Tailscale IP or MagicDNS name.
+
+Tailnet membership never approves a Hermes identity. Verify the fingerprint
+and use `bridge_peer_pair` exactly as with mDNS. See
+[`docs/tailscale-peer-discovery.md`](docs/tailscale-peer-discovery.md) for tag,
+access-policy, platform, and failure-mode setup.
+
 Approval exchanges device-bound, per-peer bearer credentials over pinned HTTPS.
 Unknown identities cannot call MCP tools. Trusted identities can recover from an
 IP change or rotate credentials with `action="reconnect"`; a changed identity

@@ -134,6 +134,7 @@ from hermes_bridge_network import (  # noqa: E402
     NetworkASGI,
     NetworkManager,
     RecoveryWorker,
+    TailscaleDiscovery,
     runtime_plan,
     validate_sandbox_config,
 )
@@ -1371,6 +1372,9 @@ def main() -> None:
                     await asyncio.to_thread(discovery.start)
                 elif backend == "memory":
                     discovery = InMemoryDiscovery(manager)
+                elif backend == "tailscale":
+                    discovery = TailscaleDiscovery(manager, args.port)
+                    discovery.start()
                 else:
                     raise RuntimeError(f"unsupported discovery backend: {backend}")
             config = uvicorn.Config(
@@ -1385,7 +1389,7 @@ def main() -> None:
                 await uvicorn.Server(config).serve()
             finally:
                 recovery.stop()
-                if isinstance(discovery, MdnsDiscovery):
+                if isinstance(discovery, (MdnsDiscovery, TailscaleDiscovery)):
                     discovery.stop()
         elif args.transport == "streamable-http":
             await server.run_streamable_http_async()
