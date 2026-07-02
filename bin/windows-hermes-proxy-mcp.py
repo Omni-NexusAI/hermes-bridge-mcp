@@ -1152,6 +1152,17 @@ def add_bridge_tools(mcp):
         """Local bridge only: cancel a task started with bridge_agent_delegate_start on this same machine."""
         return windows_agent_delegate_cancel(task_id)
 
+    # --- Pairing management tools (optional, architecture-agnostic) ---
+    # Provides bridge_manual_pair, bridge_pair_status, bridge_repair_peer,
+    # bridge_discovery_scan, bridge_discovery_pair as MCP tools that any
+    # MCP-compatible agent can invoke without slash commands or skills.
+    # If bridge_pairing_tools.py is not present, the bridge works as before.
+    try:
+        from bridge_pairing_tools import add_pairing_tools
+        add_pairing_tools(mcp)
+    except Exception:
+        pass  # Module is optional — bridge works without it
+
 
 add_windows_proxy_tools = add_bridge_tools
 
