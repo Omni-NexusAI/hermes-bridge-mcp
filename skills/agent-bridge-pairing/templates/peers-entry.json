@@ -1,0 +1,21 @@
+{
+  "peer_id": "<UNIQUE_NAME>",
+  "url": "http://<LAN_IP>:18084/mcp",
+  "platform": "<windows|linux|android>",
+  "pair_key": "<GENERATED_TOKEN_FROM_generate-token.py>"
+}
+
+/* COPY-PASTE PEER ENTRY TEMPLATE
+ *
+ * peer_id:   A unique descriptive name for this device on your network.
+ *            Same-platform devices MUST have distinct ids (e.g. "desktop",
+ *            "laptop", "quest3" — never two "windows" entries).
+ * url:       The peer's bridge endpoint. Default port 18084 (legacy HTTP).
+ *            Use https://<ip>:18443/mcp for v1.3.0+ TLS (discovery mode).
+ * platform:  "windows", "linux", "macos", or "android".
+ * pair_key:  The BARE token value (no "Bearer " prefix). Generate with:
+ *            python scripts/generate-token.py
+ *
+ * This entry goes into the "peers" array of peers.json alongside existing
+ * entries. Always read the full file first and preserve all entries.
+ */
