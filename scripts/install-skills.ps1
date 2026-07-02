@@ -1,7 +1,8 @@
 # install-skills.ps1 — Cross-platform skill deployment for Hermes Bridge MCP.
 #
 # Windows PowerShell version. Copies all skills from the repo's skills/
-# directory into the Hermes agent's skills directory.
+# directory into the Hermes agent's skills directory, then registers
+# slash commands via register-commands.py.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1
@@ -48,8 +49,23 @@ if ($skillCount -eq 0) {
     Write-Warning "No skill directories found in $SkillsSrc"
 } else {
     Write-Host "Installed $skillCount skill(s) to $SkillsDest"
-    Write-Host ""
-    Write-Host "Reload skills in your agent with:"
-    Write-Host "  hermes skills reload    (Hermes)"
-    Write-Host "  /reload-skills          (in-session)"
 }
+
+# Register slash commands (quick_commands aliases)
+Write-Host ""
+Write-Host "Registering slash commands..."
+$RegisterScript = Join-Path $SkillsSrc "agent-bridge-pairing\scripts\register-commands.py"
+if (Test-Path $RegisterScript) {
+    try {
+        & python $RegisterScript
+    } catch {
+        Write-Host "  Warning: Command registration failed (non-fatal): $_"
+    }
+} else {
+    Write-Host "  Warning: register-commands.py not found - skipping command registration."
+}
+
+Write-Host ""
+Write-Host "Done. Reload skills in your agent with:"
+Write-Host "  hermes skills reload    (Hermes)"
+Write-Host "  /reload-skills          (in-session)"
