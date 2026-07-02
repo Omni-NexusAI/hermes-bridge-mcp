@@ -1,5 +1,7 @@
 # Hermes Bridge MCP
 
+Current bridge version: `v1.3.0` (release candidate).
+
 Bridge one Hermes agent to another Hermes agent through MCP.
 
 Hermes Bridge MCP exposes direct delegation tools so a Docker-hosted agent such
@@ -26,10 +28,22 @@ bridge anymore; install Hermes messaging integrations separately if needed.
 - `bridge_agent_delegate_result`
 - `bridge_agent_delegate_cancel`
 - `bridge_peer_*` tools for authenticated Hermes-to-Hermes delegation
+- `bridge_network_status` for discovered, paired, revoked, and recovering peers
+- `bridge_peer_pair` for explicit approval, rejection, revocation, and reconnection
 
 Legacy `windows_agent_*` aliases are hidden by default. Set
 `HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS=1` only for older bridge clients that
 still call those names.
+
+## Which Tool Family To Use
+
+Use `bridge_agent_*` only for the local Hermes agent running on the same bridge
+endpoint. Do not use `bridge_agent_*` to reach a different machine, headset,
+phone, or LAN device.
+
+Use `bridge_peer_*` for another configured Hermes Bridge peer on the network.
+These tools require `peer_id`; call `bridge_agent_status` first and inspect
+`configured_peers`, `peers`, and `tool_routing` if the peer ID is unknown.
 
 `bridge_agent_delegate` runs the task through the local Hermes Bridge agent:
 
@@ -54,7 +68,7 @@ It does not expose a raw PowerShell or CMD proxy.
 ## Hermes-to-Hermes Peer Bridge
 
 Peer mode runs the same MCP server directly over Streamable HTTP and does not
-require `supergateway`:
+require `supergateway`. The legacy shared-key listener remains HTTP on `18084`:
 
 ```powershell
 $env:HERMES_BRIDGE_PAIR_KEY = "same-secret-on-each-paired-agent"
@@ -71,6 +85,50 @@ sh bin/start-hermes-bridge-peer.sh
 
 Peer endpoints default to `http://<LAN-IP>:18084/mcp`. Keep `18082` and `18083`
 for the existing A0 live/staging bridge.
+
+Automatic pairing is opt-in for upgrades. When enabled, the peer launcher also
+starts a certificate-pinned HTTPS listener on `18443` and advertises it with
+mDNS:
+
+```powershell
+$env:HERMES_BRIDGE_AUTO_DISCOVERY = "1"
+powershell -ExecutionPolicy Bypass -File $env:LOCALAPPDATA\hermes\bin\start-hermes-bridge-peer.ps1
+```
+
+Call `bridge_network_status` to inspect candidates. After comparing the complete
+fingerprint shown by the tool, approve once from either agent:
+
+```text
+bridge_peer_pair(action="approve", peer_id="candidate-id", expected_fingerprint="full-sha256-fingerprint")
+```
+
+For peers on different networks, use the opt-in Tailscale backend instead of
+mDNS. It reads Tailscale inventory from the local CLI or, on passive/mobile
+environments, the Tailscale HTTP API. The backend probes only tagged nodes and
+presents validated bridge identities as the same untrusted candidates:
+
+```powershell
+$env:HERMES_BRIDGE_AUTO_DISCOVERY = "1"
+$env:HERMES_BRIDGE_DISCOVERY_BACKEND = "tailscale"
+$env:HERMES_BRIDGE_TAILSCALE_PROVIDER = "auto"
+powershell -ExecutionPolicy Bypass -File $env:LOCALAPPDATA\hermes\bin\start-hermes-bridge-peer.ps1
+```
+
+For Android or other environments without a local Tailscale CLI, set
+`HERMES_BRIDGE_TAILSCALE_PROVIDER=api`, `HERMES_BRIDGE_TAILSCALE_API_TOKEN`,
+and `HERMES_BRIDGE_TAILNET`. If the bridge cannot infer its own Tailscale
+address from API inventory, set `HERMES_BRIDGE_ADVERTISE_ADDRESS` to its
+Tailscale IP or MagicDNS name.
+
+Tailnet membership never approves a Hermes identity. Verify the fingerprint
+and use `bridge_peer_pair` exactly as with mDNS. See
+[`docs/tailscale-peer-discovery.md`](docs/tailscale-peer-discovery.md) for tag,
+access-policy, platform, and failure-mode setup.
+
+Approval exchanges device-bound, per-peer bearer credentials over pinned HTTPS.
+Unknown identities cannot call MCP tools. Trusted identities can recover from an
+IP change or rotate credentials with `action="reconnect"`; a changed identity
+requires approval again.
 
 Static peer config lives at
 `$HERMES_BRIDGE_PEERS_CONFIG` or `~/.hermes/bridge-state/peers.json`:
@@ -96,11 +154,21 @@ Peer tools:
 - `bridge_peer_delegate_result(peer_id, task_id)`
 - `bridge_peer_delegate_cancel(peer_id, task_id)`
 
+The peer tools internally call the remote peer's `bridge_agent_*` tools over
+Streamable HTTP using the URL and bearer token from `peers.json`. Agents should
+use the peer tools rather than hand-writing JSON-RPC unless diagnosing a broken
+MCP client session.
+
 LAN-facing peer bridge startup requires `HERMES_BRIDGE_PAIR_KEY` unless
 explicitly run with the unsafe development override. Both paired agents should
 use the same pair key for the simplest setup. For multi-peer setups, each peer
 entry can use a distinct `pair_key_env`. Legacy `HERMES_BRIDGE_AUTH_TOKEN`,
 `token`, and `token_env` values are still accepted for existing installs.
+
+Static shared-key peers remain supported. Automatically paired peers use a
+persistent P-256 device identity, certificate pinning, directional credentials,
+signed pairing receipts, replay protection, and signed trusted-peer
+introductions. Introduced unknown identities remain candidates until approved.
 
 ## Requirements
 
@@ -121,7 +189,23 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 The installer copies scripts into `%LOCALAPPDATA%\hermes\bin`, creates hidden
-Startup launchers, and can restart the bridge.
+Startup launchers, installs the network dependencies into Hermes' virtual
+environment, and can restart the bridge. Automatic discovery remains disabled
+until `HERMES_BRIDGE_AUTO_DISCOVERY=1` is explicitly set.
+
+Preview paths, ports, discovery settings, and isolation without starting or
+writing runtime state:
+
+```powershell
+python scripts/validate-network-runtime.py
+```
+
+If the A0 `settings.json` file is available from Windows, the installer can add
+or update the `hermes-bridge` MCP entry:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -A0SettingsPath C:\path\to\settings.json
+```
 
 ## Docker Hermes Config
 
@@ -155,6 +239,43 @@ bridge_agent_delegate_start
 bridge_peer_status
 ```
 
+The backward-compatible core remains exactly these 11 tools:
+
+```text
+bridge_agent_status
+bridge_agent_delegate
+bridge_agent_delegate_start
+bridge_agent_delegate_status
+bridge_agent_delegate_result
+bridge_agent_delegate_cancel
+bridge_peer_status
+bridge_peer_delegate_start
+bridge_peer_delegate_status
+bridge_peer_delegate_result
+bridge_peer_delegate_cancel
+```
+
+v1.3.0 adds the optional `automatic_pairing_v1` extension tools
+`bridge_network_status` and `bridge_peer_pair`. The core list and extension list
+are reported separately in `public_tool_contract`.
+
+`bridge_agent_status` should report `bridge_version` as `v1.3.0` on every
+platform. It reports the local Hermes runtime separately as `hermes_version`.
+It also reports sanitized peer routing diagnostics without exposing token values.
+
+## Compatibility Policy
+
+Starting with `v1.2.7`, Hermes Bridge MCP versions must remain backward
+compatible with the default `bridge_agent_*` and `bridge_peer_*` tool contract
+unless a future release explicitly declares a breaking bridge version. New
+versions may add optional fields or tools, but they should not remove or rename
+the 11 default tools, change their core argument meanings, or require all peers
+to update at once for normal local and peer delegation.
+
+`bridge_agent_status` exposes `min_compatible_bridge_version`,
+`compatibility_policy`, and `public_tool_contract` so agents can verify whether a
+peer is compatible before delegation.
+
 You can also test the proxy directly:
 
 ```python
@@ -179,14 +300,18 @@ asyncio.run(main())
 ## Files
 
 - `bin/windows-hermes-proxy-mcp.py` - universal companion MCP server; filename retained for compatibility
+- `bin/hermes_bridge_network.py` - device identity, managed pairing, discovery, TLS pinning, and recovery
 - `bin/hermes-bridge-mcp-serve.cmd` - universal stdio entrypoint wrapper for supergateway on Windows
 - `bin/start-hermes-bridge-peer.ps1` - universal Windows peer launcher wrapper
 - `bin/start-hermes-bridge-peer.sh` - universal POSIX/Android peer launcher wrapper
 - `bin/start-windows-hermes-bridge*.ps1` - Windows-specific A0 bridge launchers
 - `bin/start-android-hermes-peer-bridge.sh` - Android/Termux-specific peer launcher implementation
 - `bin/windows-hermes-bridge-background-watchdog.ps1` - Windows-specific bridge watchdog
+- `scripts/configure-a0-mcp.py` - backup-first A0 MCP settings helper
+- `scripts/validate-network-runtime.py` - no-write runtime and isolation preview
 - `config/*.example.*` - peer config and env templates
 - `docs/quest-android-setup.md` - Android/Quest setup checklist
+- `docs/unpaired-device-validation.md` - opt-in release-candidate validation and rollback
 - `startup/*.vbs` - hidden Startup-folder launchers
 
 ## Notes
@@ -196,3 +321,5 @@ asyncio.run(main())
 - New installs should use the MCP server name `hermes-bridge`. Existing
   `windows-hermes` endpoint names can remain as legacy configuration aliases.
 - Delegated tasks use the local Hermes agent's normal approval policy.
+- `scripts/smoke_peer_bridge.py` is a diagnostic probe for a remote `/mcp`
+  endpoint. It is not the normal agent workflow; prefer `bridge_peer_*`.

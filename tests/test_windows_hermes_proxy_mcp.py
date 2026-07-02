@@ -1,5 +1,6 @@
 import importlib.util
 import asyncio
+import json
 import sys
 import types
 import time
@@ -20,6 +21,15 @@ def load_proxy_module():
     return module
 
 
+def load_a0_config_module():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "configure-a0-mcp.py"
+    spec = importlib.util.spec_from_file_location("configure_a0_mcp_test", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_bridge_does_not_import_hermes_messaging_server():
     path = Path(__file__).resolve().parents[1] / "bin" / "windows-hermes-proxy-mcp.py"
     source = path.read_text(encoding="utf-8")
@@ -27,6 +37,23 @@ def test_bridge_does_not_import_hermes_messaging_server():
     assert "from mcp_serve import" not in source
     assert "create_mcp_server" not in source
     assert "EventBridge" not in source
+
+
+def test_a0_config_helper_uses_universal_bridge_settings():
+    module = load_a0_config_module()
+    settings = {}
+
+    updated, changed = module.configure(settings, "hermes-bridge", "http://host.docker.internal:18082/mcp")
+    servers = json.loads(updated["mcp_servers"])["mcpServers"]
+    entry = servers["hermes-bridge"]
+
+    assert changed is True
+    assert entry["type"] == "streamable-http"
+    assert entry["url"] == "http://host.docker.internal:18082/mcp"
+    assert entry["timeout"] == 900
+    assert entry["tool_timeout"] == 900
+    assert "messenger gateway" in entry["description"]
+    assert "windows-hermes" not in servers
 
 
 def test_messaging_gateway_artifacts_are_not_shipped():
@@ -195,12 +222,71 @@ def test_delegate_only_server_does_not_expose_messaging_tools():
 
     names = asyncio.run(collect_names())
 
+    assert set(module.DEFAULT_PUBLIC_TOOLS).issubset(names)
+    assert len(module.DEFAULT_PUBLIC_TOOLS) == 11
+    assert set(module.NETWORK_EXTENSION_TOOLS).issubset(names)
     assert "messages_send" not in names
     assert "conversations_list" not in names
     assert "bridge_agent_delegate_start" in names
     assert "windows_agent_delegate_start" not in names
     assert "bridge_peer_delegate_start" in names
     assert "bridge_peer_status" in names
+
+
+def test_v127_core_tool_argument_contract_is_unchanged():
+    module = load_proxy_module()
+    server = module._create_delegate_only_server()
+    module.add_bridge_tools(server)
+
+    async def collect_schemas():
+        tools = await server.list_tools()
+        return {tool.name: tool.inputSchema for tool in tools}
+
+    schemas = asyncio.run(collect_schemas())
+    expected_properties = {
+        "bridge_agent_status": set(),
+        "bridge_agent_delegate": {"prompt", "cwd", "timeout_seconds", "max_turns", "a0_thread_key", "caller", "kill_on_timeout", "hard_timeout_seconds"},
+        "bridge_agent_delegate_start": {"prompt", "cwd", "timeout_seconds", "max_turns", "a0_thread_key", "caller", "hard_timeout_seconds"},
+        "bridge_agent_delegate_status": {"task_id"},
+        "bridge_agent_delegate_result": {"task_id"},
+        "bridge_agent_delegate_cancel": {"task_id"},
+        "bridge_peer_status": {"peer_id"},
+        "bridge_peer_delegate_start": {"peer_id", "prompt", "cwd", "timeout_seconds", "max_turns", "conversation_key", "hard_timeout_seconds"},
+        "bridge_peer_delegate_status": {"peer_id", "task_id"},
+        "bridge_peer_delegate_result": {"peer_id", "task_id"},
+        "bridge_peer_delegate_cancel": {"peer_id", "task_id"},
+    }
+    for tool_name, properties in expected_properties.items():
+        assert set(schemas[tool_name].get("properties", {})) == properties
+
+
+def test_tool_descriptions_explain_local_vs_network_routing():
+    module = load_proxy_module()
+    server = module._create_delegate_only_server()
+    module.add_bridge_tools(server)
+
+    async def collect_descriptions():
+        tools = await server.list_tools()
+        return {tool.name: tool.description for tool in tools}
+
+    descriptions = asyncio.run(collect_descriptions())
+
+    assert "Local bridge only" in descriptions["bridge_agent_delegate_start"]
+    assert "Do not use this for another device" in descriptions["bridge_agent_delegate"]
+    assert "Network peer only" in descriptions["bridge_peer_delegate_start"]
+    assert "Requires peer_id" in descriptions["bridge_peer_delegate_start"]
+
+
+def test_server_instructions_explain_routing_rule():
+    module = load_proxy_module()
+    server = module._create_delegate_only_server()
+
+    instructions = server._mcp_server.instructions
+
+    assert "Use bridge_agent_* only for the local Hermes agent" in instructions
+    assert "Never use bridge_agent_* to reach another machine" in instructions
+    assert "Use bridge_peer_* with peer_id" in instructions
+    assert "call bridge_agent_status first" in instructions
 
 
 def test_legacy_windows_tools_are_opt_in(monkeypatch):
@@ -218,6 +304,48 @@ def test_legacy_windows_tools_are_opt_in(monkeypatch):
     assert "bridge_agent_delegate_start" in names
     assert "windows_agent_delegate_start" in names
     assert "windows_agent_status" in names
+
+
+def test_bridge_agent_status_reports_bridge_version(monkeypatch):
+    module = load_proxy_module()
+    monkeypatch.setattr(module, "_run_hidden", lambda *args, **kwargs: "hermes-runtime")
+    monkeypatch.setattr(module, "_load_state", lambda: {"sessions": {}, "tasks": {}})
+    monkeypatch.setattr(module, "_peer_diagnostics", lambda: [
+        {
+            "peer_id": "quest3",
+            "url": "http://192.168.0.72:18084/mcp",
+            "platform": "android",
+            "token_configured": True,
+            "pair_key_env": "HERMES_BRIDGE_PAIR_KEY",
+            "token_env": "",
+        }
+    ])
+    server = module._create_delegate_only_server()
+    module.add_bridge_tools(server)
+
+    async def call_status():
+        content, _ = await server.call_tool("bridge_agent_status", {})
+        return json.loads(content[0].text)
+
+    status = asyncio.run(call_status())
+
+    assert module.BRIDGE_VERSION == "v1.3.0"
+    assert module.MIN_COMPATIBLE_BRIDGE_VERSION == "v1.2.7"
+    assert status["bridge_version"] == "v1.3.0"
+    assert status["min_compatible_bridge_version"] == "v1.2.7"
+    assert "Versions >= v1.2.7" in status["compatibility_policy"]
+    assert status["hermes_version"] == "hermes-runtime"
+    assert "version" not in status
+    assert status["configured_peers"] == ["quest3"]
+    assert status["peer_tools_available"] is True
+    assert status["peers"][0]["token_configured"] is True
+    assert "token" not in status["peers"][0]
+    assert status["tool_routing"]["local_tools"] == "bridge_agent_*"
+    assert status["tool_routing"]["network_peer_tools"] == "bridge_peer_*"
+    assert "Use bridge_agent_* only for the local Hermes agent" in status["tool_routing"]["rule"]
+    assert status["public_tool_contract"]["default_tool_count"] == 11
+    assert status["public_tool_contract"]["default_tools"] == list(module.DEFAULT_PUBLIC_TOOLS)
+    assert status["public_tool_contract"]["stable_since"] == "v1.2.7"
 
 
 def test_cross_platform_home_prefers_env(monkeypatch, tmp_path):
@@ -379,6 +507,44 @@ def test_create_server_with_auth_token():
     server = module._create_delegate_only_server(host="0.0.0.0", port=18084, auth_token="secret")
 
     assert server is not None
+    assert server.settings.auth is None
+    assert server._token_verifier is None
+    assert server._bridge_bearer_tokens == ["secret"]
+
+
+def test_bearer_token_middleware_enforces_shared_token():
+    module = load_proxy_module()
+    calls = []
+
+    async def app(scope, receive, send):
+        calls.append(scope)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def invoke(headers):
+        sent = []
+        async def send(message):
+            sent.append(message)
+
+        middleware = module._BearerTokenMiddleware(app, ["secret"], "/mcp")
+        await middleware(
+            {
+                "type": "http",
+                "path": "/mcp",
+                "headers": headers,
+            },
+            None,
+            send,
+        )
+        return sent
+
+    accepted = asyncio.run(invoke([(b"authorization", b"Bearer secret")]))
+    rejected = asyncio.run(invoke([(b"authorization", b"Bearer wrong")]))
+    missing = asyncio.run(invoke([]))
+
+    assert accepted[0]["status"] == 200
+    assert rejected[0]["status"] == 401
+    assert missing[0]["status"] == 401
 
 
 def test_peer_thread_key_is_per_peer_and_conversation(monkeypatch):
@@ -425,3 +591,87 @@ def test_peer_delegate_start_forwards_per_peer_thread_key(monkeypatch):
     assert arguments["max_turns"] == 5
     assert arguments["caller"] == "windows"
     assert arguments["a0_thread_key"].startswith("peer:windows:to:quest3:")
+
+
+def test_peer_not_found_error_includes_available_peers(monkeypatch):
+    module = load_proxy_module()
+    monkeypatch.setattr(module, "_load_peer_config", lambda: {
+        "quest3": {
+            "peer_id": "quest3",
+            "url": "http://192.168.0.72:18084/mcp",
+            "platform": "android",
+            "token": "secret",
+        }
+    })
+
+    result = module._peer_call("missing", "bridge_agent_status", {})
+
+    assert result["peer_id"] == "missing"
+    assert result["available_peers"] == ["quest3"]
+    assert "Call bridge_agent_status" in result["next_action"]
+
+
+def test_peer_missing_token_error_has_pair_key_guidance(monkeypatch):
+    module = load_proxy_module()
+    monkeypatch.setattr(module, "_load_peer_config", lambda: {
+        "quest3": {
+            "peer_id": "quest3",
+            "url": "http://192.168.0.72:18084/mcp",
+            "platform": "android",
+            "token": "",
+        }
+    })
+
+    result = module._peer_call("quest3", "bridge_agent_status", {})
+
+    assert result["auth_required"] == "shared_bearer_pair_key"
+    assert "HERMES_BRIDGE_PAIR_KEY" in result["accepted_token_sources"]
+    assert result["token_configured"] is False
+
+
+def test_peer_connection_error_includes_recovery_fields(monkeypatch):
+    module = load_proxy_module()
+    monkeypatch.setattr(module, "_load_peer_config", lambda: {
+        "quest3": {
+            "peer_id": "quest3",
+            "url": "http://192.168.0.72:18084/mcp",
+            "platform": "android",
+            "token": "secret",
+        }
+    })
+
+    async def fail_call(peer, tool_name, arguments):
+        raise TimeoutError("offline")
+
+    monkeypatch.setattr(module, "_call_peer_tool", fail_call)
+    result = module._peer_call("quest3", "bridge_agent_status", {})
+
+    assert result["error_type"] == "TimeoutError"
+    assert result["peer_url"] == "http://192.168.0.72:18084/mcp"
+    assert result["peer_platform"] == "android"
+    assert result["remote_tool_called"] == "bridge_agent_status"
+    assert result["used_tool_family"] == "bridge_peer"
+    assert "remote peer bridge is running" in result["next_action"]
+
+
+def test_peer_success_includes_tool_family_metadata(monkeypatch):
+    module = load_proxy_module()
+    monkeypatch.setattr(module, "_load_peer_config", lambda: {
+        "quest3": {
+            "peer_id": "quest3",
+            "url": "http://192.168.0.72:18084/mcp",
+            "platform": "android",
+            "token": "secret",
+        }
+    })
+    async def ok_call(peer, tool_name, arguments):
+        return {"status": "ok"}
+
+    monkeypatch.setattr(module, "_call_peer_tool", ok_call)
+
+    result = module._peer_call("quest3", "bridge_agent_status", {})
+
+    assert result["status"] == "ok"
+    assert result["used_tool_family"] == "bridge_peer"
+    assert result["remote_tool_called"] == "bridge_agent_status"
+    assert result["peer_id"] == "quest3"

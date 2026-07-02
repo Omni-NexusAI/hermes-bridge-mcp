@@ -8,7 +8,9 @@ import os
 import platform
 import re
 import shutil
+import secrets
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -50,6 +52,25 @@ def _default_hermes_exe(home: Path, agent: Path) -> Path:
 HERMES_HOME = _default_hermes_home()
 HERMES_AGENT = _default_hermes_agent(HERMES_HOME)
 HERMES_EXE = _default_hermes_exe(HERMES_HOME, HERMES_AGENT)
+BRIDGE_VERSION = "v1.3.0"
+MIN_COMPATIBLE_BRIDGE_VERSION = "v1.2.7"
+DEFAULT_PUBLIC_TOOLS = (
+    "bridge_agent_status",
+    "bridge_agent_delegate",
+    "bridge_agent_delegate_start",
+    "bridge_agent_delegate_status",
+    "bridge_agent_delegate_result",
+    "bridge_agent_delegate_cancel",
+    "bridge_peer_status",
+    "bridge_peer_delegate_start",
+    "bridge_peer_delegate_status",
+    "bridge_peer_delegate_result",
+    "bridge_peer_delegate_cancel",
+)
+NETWORK_EXTENSION_TOOLS = (
+    "bridge_network_status",
+    "bridge_peer_pair",
+)
 DEFAULT_CWD = Path.home()
 BRIDGE_STATE_DIR = Path(os.environ.get("HERMES_BRIDGE_STATE_DIR", str(HERMES_HOME / "bridge-state"))).expanduser()
 BRIDGE_STATE_FILE = Path(
@@ -100,8 +121,35 @@ try:  # noqa: E402
 except ImportError:  # pragma: no cover
     from mcp.client.streamable_http import streamablehttp_client as _streamable_http_client  # type: ignore # noqa: E402
 from mcp.server.auth.provider import AccessToken, TokenVerifier  # noqa: E402
-from mcp.server.auth.settings import AuthSettings  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+from hermes_bridge_network import (  # noqa: E402
+    DEFAULT_SECURE_PORT,
+    InMemoryDiscovery,
+    MdnsDiscovery,
+    NetworkASGI,
+    NetworkManager,
+    RecoveryWorker,
+    TailscaleDiscovery,
+    runtime_plan,
+    validate_sandbox_config,
+)
+
+os.environ.setdefault("HERMES_BRIDGE_VERSION", BRIDGE_VERSION)
+
+_NETWORK_MANAGER: Optional[NetworkManager] = None
+
+
+def _network_manager() -> NetworkManager:
+    global _NETWORK_MANAGER
+    if _NETWORK_MANAGER is None:
+        secure_port = int(os.environ.get("HERMES_BRIDGE_SECURE_PORT", str(DEFAULT_SECURE_PORT)))
+        _NETWORK_MANAGER = NetworkManager(BRIDGE_STATE_DIR, secure_port=secure_port)
+    return _NETWORK_MANAGER
 
 
 class _SharedTokenVerifier(TokenVerifier):
@@ -114,6 +162,66 @@ class _SharedTokenVerifier(TokenVerifier):
         if token not in self._tokens:
             return None
         return AccessToken(token=token, client_id="hermes-peer", scopes=["hermes-bridge"])
+
+
+class _BearerTokenMiddleware:
+    def __init__(self, app: Any, tokens: list[str], path: str, token_provider=None):
+        self.app = app
+        self.tokens = {token for token in tokens if token}
+        self.path = path
+        self.token_provider = token_provider
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http" or scope.get("path") != self.path:
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        auth_header = headers.get("authorization", "")
+        scheme, _, token = auth_header.partition(" ")
+        allowed = set(self.tokens)
+        if self.token_provider:
+            allowed.update(item for item in self.token_provider() if item)
+        if scheme.lower() == "bearer" and token and any(secrets.compare_digest(token, item) for item in allowed):
+            await self.app(scope, receive, send)
+            return
+
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"text/plain; charset=utf-8"),
+                (b"www-authenticate", b"Bearer"),
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": b"Unauthorized",
+        })
+
+
+class _BearerOnlyFastMCP(FastMCP):
+    def __init__(self, *args: Any, bearer_tokens: Optional[list[str]] = None, token_provider=None, network_manager=None, **kwargs: Any):
+        self._bridge_bearer_tokens = [token for token in (bearer_tokens or []) if token]
+        self._bridge_token_provider = token_provider
+        self._bridge_network_manager = network_manager
+        super().__init__(*args, **kwargs)
+
+    def streamable_http_app(self):
+        app = super().streamable_http_app()
+        if self._bridge_bearer_tokens or self._bridge_token_provider:
+            app = _BearerTokenMiddleware(
+                app,
+                self._bridge_bearer_tokens,
+                self.settings.streamable_http_path,
+                token_provider=self._bridge_token_provider,
+            )
+        if self._bridge_network_manager:
+            app = NetworkASGI(app, self._bridge_network_manager)
+        return app
 
 
 def _json(data: dict) -> str:
@@ -327,6 +435,8 @@ def _extract_session_id(stdout: str, stderr: str) -> Optional[str]:
 
 
 def _delegate_runner_available() -> bool:
+    if os.environ.get("HERMES_BRIDGE_TEST_SANDBOX") == "1" and os.environ.get("HERMES_BRIDGE_STUB_DELEGATE") == "1":
+        return True
     if HERMES_EXE.exists():
         return True
     return bool(shutil.which(str(HERMES_EXE)))
@@ -351,6 +461,8 @@ def _convert_cwd(cwd: Optional[str]) -> tuple[Optional[Path], Optional[str]]:
 
 
 def _run_hidden(args: list[str], cwd: Optional[Path], timeout_seconds: int) -> dict:
+    if os.environ.get("HERMES_BRIDGE_TEST_SANDBOX") == "1" and os.environ.get("HERMES_BRIDGE_STUB_DELEGATE") == "1":
+        return {"exit_code": 0, "timed_out": False, "elapsed_ms": 0, "stdout": "SANDBOX_STUB_OK", "stderr_tail": ""}
     creationflags = 0
     startupinfo = None
     if os.name == "nt":
@@ -401,6 +513,18 @@ def _run_hidden(args: list[str], cwd: Optional[Path], timeout_seconds: int) -> d
 
 
 def _start_hidden(args: list[str], cwd: Optional[Path]) -> subprocess.Popen:
+    if os.environ.get("HERMES_BRIDGE_TEST_SANDBOX") == "1" and os.environ.get("HERMES_BRIDGE_STUB_DELEGATE") == "1":
+        return subprocess.Popen(
+            [sys.executable, "-c", "import sys; print('SANDBOX_DELEGATE_OK'); print('session_id: sandbox-session', file=sys.stderr)"],
+            cwd=str(cwd) if cwd else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+        )
     creationflags = 0
     startupinfo = None
     if os.name == "nt":
@@ -653,11 +777,20 @@ def _parse_peer_config(config_path: Path) -> dict[str, dict[str, Any]]:
 
 
 def _load_peer_config(path: Optional[Path] = None) -> dict[str, dict[str, Any]]:
+    static_peers: dict[str, dict[str, Any]] = {}
     for config_path in _peer_config_candidates(path):
         if not config_path.exists():
             continue
-        return _parse_peer_config(config_path)
-    return {}
+        static_peers = _parse_peer_config(config_path)
+        break
+    if path is not None:
+        return static_peers
+    try:
+        managed_peers = _network_manager().managed_peer_config()
+    except Exception:
+        managed_peers = {}
+    # Explicit legacy/static configuration remains authoritative on collisions.
+    return {**managed_peers, **static_peers}
 
 
 def _get_peer(peer_id: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
@@ -671,7 +804,7 @@ def _get_peer(peer_id: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     if not peer:
         return None, f"peer not found: {peer_id}"
     if not peer.get("token"):
-        return None, f"peer pair key is missing for {peer_id}; set pair_key_env, token_env, token, or HERMES_BRIDGE_PAIR_KEY"
+        return peer, f"peer pair key is missing for {peer_id}; set pair_key_env, token_env, token, or HERMES_BRIDGE_PAIR_KEY"
     return peer, None
 
 
@@ -682,6 +815,55 @@ def _configured_peer_ids() -> list[str]:
         return []
 
 
+def _peer_public_record(peer: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "peer_id": peer.get("peer_id"),
+        "url": peer.get("url"),
+        "platform": peer.get("platform", "unknown"),
+        "token_configured": bool(peer.get("token")),
+        "pair_key_env": peer.get("pair_key_env") or "",
+        "token_env": peer.get("token_env") or "",
+        "managed": bool(peer.get("managed")),
+        "identity_fingerprint": peer.get("fingerprint") or "",
+        "certificate_pinned": bool(peer.get("cert_pem")),
+    }
+
+
+def _peer_diagnostics() -> list[dict[str, Any]]:
+    try:
+        return [_peer_public_record(peer) for peer in _load_peer_config().values()]
+    except Exception:
+        return []
+
+
+def _peer_error_response(peer_id: str, error: str, peer: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    peers = _peer_diagnostics()
+    response: dict[str, Any] = {
+        "error": error,
+        "peer_id": peer_id,
+        "available_peers": [item["peer_id"] for item in peers if item.get("peer_id")],
+        "peer_config_file": str(PEER_CONFIG_FILE),
+        "peer_config_candidates": [str(candidate) for candidate in _peer_config_candidates()],
+    }
+    if peer:
+        response.update({
+            "peer_url": peer.get("url"),
+            "peer_platform": peer.get("platform", "unknown"),
+            "token_configured": bool(peer.get("token")),
+        })
+    if "not found" in error:
+        response["next_action"] = "Call bridge_agent_status to inspect configured_peers, then retry bridge_peer_* with one of those peer_id values."
+    elif "pair key" in error or "token" in error:
+        response.update({
+            "auth_required": "shared_bearer_pair_key",
+            "accepted_token_sources": ["pair_key", "pair_key_env", "token", "token_env", "HERMES_BRIDGE_PAIR_KEY", "HERMES_BRIDGE_AUTH_TOKEN"],
+            "next_action": "Set a shared pair key for this peer and restart or reload the bridge process so it can read the token.",
+        })
+    else:
+        response["next_action"] = "Check peer config, pair key, and network reachability; use scripts/smoke_peer_bridge.py only as a diagnostic fallback."
+    return response
+
+
 def _peer_thread_key(remote_peer_id: str, conversation_key: Optional[str]) -> str:
     raw = str(conversation_key or "default").strip() or "default"
     digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
@@ -690,7 +872,12 @@ def _peer_thread_key(remote_peer_id: str, conversation_key: Optional[str]) -> st
 
 async def _call_peer_tool(peer: dict[str, Any], tool_name: str, arguments: dict[str, Any]) -> Any:
     headers = {"Authorization": f"Bearer {peer['token']}"}
-    async with httpx.AsyncClient(headers=headers, timeout=None) as client:
+    verify: Any = True
+    if peer.get("cert_pem"):
+        from hermes_bridge_network import _pinned_ssl_context
+
+        verify = _pinned_ssl_context(str(peer["cert_pem"]))
+    async with httpx.AsyncClient(headers=headers, timeout=None, verify=verify, trust_env=False) as client:
         async with _streamable_http_client(peer["url"], http_client=client) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
@@ -722,7 +909,7 @@ def _run_coroutine_sync(coro):
     return box.get("result")
 
 
-def _peer_result(peer: dict[str, Any], remote: Any) -> dict[str, Any]:
+def _peer_result(peer: dict[str, Any], tool_name: str, remote: Any) -> dict[str, Any]:
     if isinstance(remote, dict):
         data = dict(remote)
     else:
@@ -730,18 +917,38 @@ def _peer_result(peer: dict[str, Any], remote: Any) -> dict[str, Any]:
     data.setdefault("peer_id", peer["peer_id"])
     data.setdefault("peer_url", peer["url"])
     data.setdefault("peer_platform", peer.get("platform", "unknown"))
+    data.setdefault("used_tool_family", "bridge_peer")
+    data.setdefault("remote_tool_called", tool_name)
     return data
 
 
 def _peer_call(peer_id: str, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     peer, err = _get_peer(peer_id)
     if err:
-        return {"error": err, "peer_id": peer_id}
+        return _peer_error_response(peer_id, err, peer)
     try:
         remote = _run_coroutine_sync(_call_peer_tool(peer, tool_name, arguments))
     except Exception as exc:
-        return {"error": f"{type(exc).__name__}: {exc}", "peer_id": peer_id, "peer_url": peer["url"]}
-    return _peer_result(peer, remote)
+        if peer and peer.get("managed") and ("401" in str(exc) or "Unauthorized" in str(exc)):
+            try:
+                managed = _network_manager().state.peer(peer_id)
+                if managed:
+                    _network_manager().rekey_peer(managed, managed.get("candidate_url") or managed["url"])
+                    refreshed, refreshed_error = _get_peer(peer_id)
+                    if refreshed and not refreshed_error:
+                        remote = _run_coroutine_sync(_call_peer_tool(refreshed, tool_name, arguments))
+                        return _peer_result(refreshed, tool_name, remote)
+            except Exception:
+                pass
+        response = _peer_error_response(peer_id, f"{type(exc).__name__}: {exc}", peer)
+        response.update({
+            "error_type": type(exc).__name__,
+            "remote_tool_called": tool_name,
+            "used_tool_family": "bridge_peer",
+            "next_action": "Verify the remote peer bridge is running, the peer URL is reachable, and the shared bearer pair key matches.",
+        })
+        return response
+    return _peer_result(peer, tool_name, remote)
 
 
 def _peer_delegate_start(
@@ -777,10 +984,19 @@ def add_bridge_tools(mcp):
 
         Direct delegation does not require Telegram or Hermes Gateway.
         """
-        version = _run_hidden([str(HERMES_EXE), "--version"], cwd=HERMES_AGENT, timeout_seconds=30)
+        hermes_version = _run_hidden([str(HERMES_EXE), "--version"], cwd=HERMES_AGENT, timeout_seconds=30)
         config_path = _run_hidden([str(HERMES_EXE), "config", "path"], cwd=HERMES_AGENT, timeout_seconds=30)
         state = _load_state()
+        peers = _peer_diagnostics()
+        configured_peer_ids = [peer["peer_id"] for peer in peers if peer.get("peer_id")]
+        try:
+            network = _network_manager().network_status()
+        except Exception as exc:
+            network = {"extension": "automatic_pairing_v1", "error": f"{type(exc).__name__}: {exc}"}
         return _json({
+            "bridge_version": BRIDGE_VERSION,
+            "min_compatible_bridge_version": MIN_COMPATIBLE_BRIDGE_VERSION,
+            "compatibility_policy": "Versions >= v1.2.7 preserve the default bridge_agent_* and bridge_peer_* tool contract unless a future breaking bridge version is explicitly declared.",
             "hermes_exe": str(HERMES_EXE),
             "hermes_home": str(HERMES_HOME),
             "hermes_agent": str(HERMES_AGENT),
@@ -788,7 +1004,24 @@ def add_bridge_tools(mcp):
             "peer_config_file": str(PEER_CONFIG_FILE),
             "peer_config_candidates": [str(candidate) for candidate in _peer_config_candidates()],
             "local_peer_id": LOCAL_PEER_ID,
-            "configured_peers": _configured_peer_ids(),
+            "configured_peers": configured_peer_ids,
+            "peer_tools_available": bool(configured_peer_ids),
+            "peers": peers,
+            "tool_routing": {
+                "local_tools": "bridge_agent_*",
+                "network_peer_tools": "bridge_peer_*",
+                "rule": "Use bridge_agent_* only for the local Hermes agent on this same bridge endpoint. Use bridge_peer_* with peer_id for any other configured machine or device on the network.",
+                "peer_discovery": "Call bridge_agent_status to inspect configured_peers before using bridge_peer_*.",
+            },
+            "public_tool_contract": {
+                "default_tool_count": len(DEFAULT_PUBLIC_TOOLS),
+                "default_tools": list(DEFAULT_PUBLIC_TOOLS),
+                "extension_tools": list(NETWORK_EXTENSION_TOOLS),
+                "automatic_pairing_extension": "automatic_pairing_v1",
+                "legacy_windows_tools_env": "HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS",
+                "stable_since": MIN_COMPATIBLE_BRIDGE_VERSION,
+            },
+            "network": network,
             "pair_key_configured": bool(_configured_pair_key()),
             "legacy_auth_token_configured": bool(_env_value("HERMES_BRIDGE_AUTH_TOKEN")),
             "platform": platform.system().lower() or "unknown",
@@ -798,7 +1031,7 @@ def add_bridge_tools(mcp):
             "delegate_transport": "local hermes chat subprocess via Hermes Bridge",
             "tracked_a0_threads": len(state.get("sessions", {})),
             "tracked_tasks": len(state.get("tasks", {})),
-            "version": version,
+            "hermes_version": hermes_version,
             "config_path": config_path,
         })
 
@@ -939,7 +1172,7 @@ def add_bridge_tools(mcp):
 
     @mcp.tool()
     def bridge_peer_status(peer_id: str) -> str:
-        """Return status from a configured remote Hermes bridge peer."""
+        """Network peer only: return status from another configured Hermes Bridge device by peer_id. Use bridge_agent_status for this local bridge."""
         return _json(_peer_call(peer_id, "bridge_agent_status", {}))
 
     @mcp.tool()
@@ -952,27 +1185,49 @@ def add_bridge_tools(mcp):
         conversation_key: Optional[str] = None,
         hard_timeout_seconds: Optional[int] = None,
     ) -> str:
-        """Start a pollable delegation on a configured remote Hermes peer with adaptive timeout guidance."""
+        """Network peer only: start delegated work on another configured Hermes Bridge device. Requires peer_id from bridge_agent_status configured_peers."""
         return _json(_peer_delegate_start(peer_id, prompt, cwd, timeout_seconds, max_turns, conversation_key, hard_timeout_seconds))
 
     @mcp.tool()
     def bridge_peer_delegate_status(peer_id: str, task_id: str) -> str:
-        """Return status for a remote Hermes peer delegation task."""
+        """Network peer only: poll a task that was started with bridge_peer_delegate_start on another configured device."""
         return _json(_peer_call(peer_id, "bridge_agent_delegate_status", {"task_id": task_id}))
 
     @mcp.tool()
     def bridge_peer_delegate_result(peer_id: str, task_id: str) -> str:
-        """Return final output for a remote Hermes peer delegation task."""
+        """Network peer only: return final output for a task started with bridge_peer_delegate_start on another configured device."""
         return _json(_peer_call(peer_id, "bridge_agent_delegate_result", {"task_id": task_id}))
 
     @mcp.tool()
     def bridge_peer_delegate_cancel(peer_id: str, task_id: str) -> str:
-        """Cancel a running remote Hermes peer delegation task."""
+        """Network peer only: cancel a task started with bridge_peer_delegate_start on another configured device."""
         return _json(_peer_call(peer_id, "bridge_agent_delegate_cancel", {"task_id": task_id}))
 
     @mcp.tool()
+    def bridge_network_status() -> str:
+        """Read-only automatic pairing status: local identity, discovered candidates, paired peers, revocations, and discovery configuration."""
+        try:
+            return _json(_network_manager().network_status())
+        except Exception as exc:
+            return _json({"error": f"{type(exc).__name__}: {exc}", "extension": "automatic_pairing_v1"})
+
+    @mcp.tool()
+    def bridge_peer_pair(action: str, peer_id: str, expected_fingerprint: Optional[str] = None) -> str:
+        """Manage automatic pairing. Actions: approve a discovered identity, reject a candidate, revoke a paired identity, or reconnect a known identity."""
+        try:
+            return _json(_network_manager().pair_action(action, peer_id, expected_fingerprint))
+        except Exception as exc:
+            return _json({
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "action": action,
+                "peer_id": peer_id,
+                "next_action": "Call bridge_network_status, verify the identity fingerprint, then retry with an allowed action.",
+            })
+
+    @mcp.tool()
     def bridge_agent_status() -> str:
-        """Report local Hermes bridge readiness. Does not require Telegram or Hermes Gateway."""
+        """Local bridge only: report this machine's Hermes Bridge status, configured peers, and routing guidance."""
         return windows_agent_status()
 
     @mcp.tool()
@@ -986,7 +1241,7 @@ def add_bridge_tools(mcp):
         kill_on_timeout: bool = False,
         hard_timeout_seconds: Optional[int] = None,
     ) -> str:
-        """Delegate a prompt to the local Hermes bridge agent using its normal tools, memory, and session state."""
+        """Local bridge only: delegate a short prompt to the Hermes agent on this same machine. Do not use this for another device; use bridge_peer_delegate_start."""
         return windows_agent_delegate(prompt, cwd, timeout_seconds, max_turns, a0_thread_key, caller, kill_on_timeout, hard_timeout_seconds)
 
     @mcp.tool()
@@ -999,22 +1254,22 @@ def add_bridge_tools(mcp):
         caller: Optional[str] = None,
         hard_timeout_seconds: Optional[int] = None,
     ) -> str:
-        """Start a pollable local Hermes bridge delegation task."""
+        """Local bridge only: start a pollable task on the Hermes agent on this same machine. For another device, use bridge_peer_delegate_start."""
         return windows_agent_delegate_start(prompt, cwd, timeout_seconds, max_turns, a0_thread_key, caller, hard_timeout_seconds)
 
     @mcp.tool()
     def bridge_agent_delegate_status(task_id: str) -> str:
-        """Return status, remaining deadline, and polling guidance for a local Hermes bridge delegation task."""
+        """Local bridge only: poll a task started with bridge_agent_delegate_start on this same machine."""
         return windows_agent_delegate_status(task_id)
 
     @mcp.tool()
     def bridge_agent_delegate_result(task_id: str) -> str:
-        """Return final output for a local Hermes bridge delegation task, or latest guided status if still running."""
+        """Local bridge only: return final output for a task started with bridge_agent_delegate_start on this same machine."""
         return windows_agent_delegate_result(task_id)
 
     @mcp.tool()
     def bridge_agent_delegate_cancel(task_id: str) -> str:
-        """Cancel a running local Hermes bridge delegation task."""
+        """Local bridge only: cancel a task started with bridge_agent_delegate_start on this same machine."""
         return windows_agent_delegate_cancel(task_id)
 
 
@@ -1040,31 +1295,31 @@ def _create_delegate_only_server(
     host: str = "127.0.0.1",
     port: int = 8000,
     auth_token: Optional[str] = None,
+    network_manager: Optional[NetworkManager] = None,
 ) -> "FastMCP":
     tokens = _auth_tokens(auth_token)
-    token_verifier = _SharedTokenVerifier(tokens) if tokens else None
-    auth = None
-    if tokens:
-        resource_url = f"http://localhost:{port}"
-        auth = AuthSettings(issuer_url=resource_url, resource_server_url=resource_url, required_scopes=["hermes-bridge"])
-    return FastMCP(
+    return _BearerOnlyFastMCP(
         "hermes-bridge",
         instructions=(
-            "Direct agents to the local Hermes Bridge agent. Use "
-            "bridge_agent_delegate_start/status/result/cancel, or "
-            "bridge_agent_delegate for short compatibility calls. For long "
-            "tasks, start the delegation and poll status/result with the "
-            "returned task_id; timeout_seconds is the caller wait window, not "
-            "the background execution lifetime. Use bridge_peer_* tools for "
-            "authenticated Hermes-to-Hermes network delegation. This bridge "
-            "does not require Telegram, Discord, Slack, WhatsApp, or Hermes "
-            "Gateway."
+            "Hermes Bridge has two tool families. Use bridge_agent_* only for "
+            "the local Hermes agent running on this same bridge endpoint. Never "
+            "use bridge_agent_* to reach another machine, headset, phone, or "
+            "network device. Use bridge_peer_* with peer_id for authenticated "
+            "Hermes-to-Hermes network delegation to configured peers. If peer_id "
+            "is unknown, call bridge_agent_status first and read configured_peers "
+            "and tool_routing. For long tasks, use the *_delegate_start tool and "
+            "poll the matching *_delegate_status/result tools with the returned "
+            "task_id. timeout_seconds is the caller wait window, not the "
+            "background execution lifetime. This bridge does not require "
+            "Telegram, Discord, Slack, WhatsApp, or Hermes Gateway."
         ),
         host=host,
         port=port,
         streamable_http_path="/mcp",
-        token_verifier=token_verifier,
-        auth=auth,
+        auth=None,
+        bearer_tokens=tokens,
+        token_provider=network_manager.state.inbound_tokens if network_manager else None,
+        network_manager=network_manager,
     )
 
 
@@ -1075,21 +1330,68 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=int(os.environ.get("HERMES_BRIDGE_PORT", "8000")))
     parser.add_argument("--auth-token", default=_configured_auth_token())
     parser.add_argument("--allow-unsafe-lan", action="store_true", default=os.environ.get("HERMES_BRIDGE_ALLOW_UNSAFE_LAN") == "1")
+    parser.add_argument("--secure-network", action="store_true", default=os.environ.get("HERMES_BRIDGE_SECURE_NETWORK") == "1")
+    parser.add_argument("--dry-run", action="store_true", help="Print resolved runtime paths, ports, discovery, and isolation settings without writing or starting services.")
     return parser
 
 
 def main() -> None:
     args = _build_arg_parser().parse_args()
-    if args.transport == "streamable-http":
+    if args.dry_run:
+        legacy_port = int(os.environ.get("HERMES_BRIDGE_LEGACY_PORT", "18084"))
+        secure_port = int(os.environ.get("HERMES_BRIDGE_SECURE_PORT", str(DEFAULT_SECURE_PORT)))
+        print(_json(runtime_plan(BRIDGE_STATE_DIR, args.host, legacy_port, secure_port)))
+        return
+
+    validate_sandbox_config(BRIDGE_STATE_DIR, args.host, [args.port])
+
+    if args.transport == "streamable-http" and not args.secure_network:
         auth_error = _validate_http_auth(args.host, args.auth_token, args.allow_unsafe_lan)
         if auth_error:
             raise SystemExit(auth_error)
 
-    server = _create_delegate_only_server(args.host, args.port, args.auth_token)
+    manager = _network_manager() if args.secure_network else None
+    server = _create_delegate_only_server(args.host, args.port, args.auth_token, network_manager=manager)
     add_bridge_tools(server)
 
     async def _run() -> None:
-        if args.transport == "streamable-http":
+        if args.transport == "streamable-http" and args.secure_network:
+            import uvicorn
+
+            identity = manager.identity
+            discovery = None
+            recovery = RecoveryWorker(manager, float(os.environ.get("HERMES_BRIDGE_RECOVERY_INTERVAL", "30")))
+            recovery.start()
+            if os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "0") == "1":
+                backend = os.environ.get("HERMES_BRIDGE_DISCOVERY_BACKEND", "mdns")
+                if backend == "mdns":
+                    discovery = MdnsDiscovery(manager, args.host, args.port)
+                    # Run mDNS registration in a worker thread so zeroconf manages
+                    # its own event loop. Calling register_service() synchronously
+                    # from inside this running asyncio loop deadlocks (EventLoopBlocked).
+                    await asyncio.to_thread(discovery.start)
+                elif backend == "memory":
+                    discovery = InMemoryDiscovery(manager)
+                elif backend == "tailscale":
+                    discovery = TailscaleDiscovery(manager, args.port)
+                    discovery.start()
+                else:
+                    raise RuntimeError(f"unsupported discovery backend: {backend}")
+            config = uvicorn.Config(
+                server.streamable_http_app(),
+                host=args.host,
+                port=args.port,
+                log_level=os.environ.get("HERMES_BRIDGE_LOG_LEVEL", "info"),
+                ssl_keyfile=str(identity.key_path),
+                ssl_certfile=str(identity.cert_path),
+            )
+            try:
+                await uvicorn.Server(config).serve()
+            finally:
+                recovery.stop()
+                if isinstance(discovery, (MdnsDiscovery, TailscaleDiscovery)):
+                    discovery.stop()
+        elif args.transport == "streamable-http":
             await server.run_streamable_http_async()
         else:
             await server.run_stdio_async()
