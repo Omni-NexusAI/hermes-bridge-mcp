@@ -744,9 +744,9 @@ class NetworkManager:
         receipt_fingerprints = {receipt.get("left_fingerprint"), receipt.get("right_fingerprint")}
         if peer_id not in receipt_ids or fingerprint not in receipt_fingerprints:
             raise ValueError("rekey identity does not match the signed receipt")
-        token_for_requester = secrets.token_urlsafe(32)
-        # Single shared token model (v1.2.7+): use same token for rekey too.
-        shared_token = token_for_requester
+        # Single shared token model (v1.2.7+): reuse the initiator's token
+        # for both directions, exactly like approve()/accept_pair_offer().
+        shared_token = _validate_token(request.get("token_for_remote"))
         self.state.save_peer({
             "peer_id": peer_id,
             "display_name": request.get("display_name"),
@@ -800,7 +800,7 @@ class NetworkManager:
         updated.update({
             "url": endpoint,
             "inbound_token": token_for_remote,
-            "outbound_token": accepted["token_for_requester"],
+            "outbound_token": token_for_remote,  # Single shared token (v1.2.7+)
             "last_seen": _now(),
         })
         return self.state.save_peer(updated)
