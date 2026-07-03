@@ -612,6 +612,9 @@ class NetworkManager:
         identity = self.identity
         token_for_remote = secrets.token_urlsafe(32)
         expires_at = _now() + PAIR_REQUEST_TTL_SECONDS
+        # Single shared token model (v1.2.7+): both directions use the same token.
+        # The dual-directional token model (separate inbound/outbound) is deprecated
+        # but the field names are retained for backward compatibility.
         receipt = {
             "version": 1,
             "left_peer_id": identity.peer_id,
@@ -658,7 +661,7 @@ class NetworkManager:
             "url": candidate["url"],
             "platform": remote.get("platform", "unknown"),
             "inbound_token": token_for_remote,
-            "outbound_token": accepted["token_for_initiator"],
+            "outbound_token": token_for_remote,  # Single shared token (v1.2.7+)
             "receipt": final_receipt,
             "last_seen": _now(),
         })
@@ -684,7 +687,8 @@ class NetworkManager:
             raise ValueError("pairing receipt does not match the initiating identity")
         if receipt.get("right_peer_id") != self.identity.peer_id or receipt.get("right_fingerprint") != self.identity.fingerprint:
             raise ValueError("pairing receipt is not addressed to this identity")
-        token_for_initiator = secrets.token_urlsafe(32)
+        # Single shared token model (v1.2.7+): use the token from the offer for both directions.
+        shared_token = _validate_token(offer.get("token_for_remote"))
         right_signature = self.identities.sign(receipt)
         final_receipt = dict(receipt)
         final_receipt["left_signature"] = offer["receipt_signature"]
@@ -696,8 +700,8 @@ class NetworkManager:
             "cert_pem": cert_pem,
             "url": _validate_peer_url(offer.get("url")),
             "platform": offer.get("platform", "unknown"),
-            "inbound_token": token_for_initiator,
-            "outbound_token": _validate_token(offer.get("token_for_remote")),
+            "inbound_token": shared_token,
+            "outbound_token": shared_token,  # Single shared token (v1.2.7+)
             "receipt": final_receipt,
             "last_seen": _now(),
         })
@@ -706,7 +710,7 @@ class NetworkManager:
             "nonce": offer["nonce"],
             "peer_id": self.identity.peer_id,
             "fingerprint": self.identity.fingerprint,
-            "token_for_initiator": token_for_initiator,
+            "token_for_initiator": shared_token,  # Same token both directions
             "receipt_signature": right_signature,
         }
         response["signature"] = self.identities.sign(response)
@@ -740,7 +744,9 @@ class NetworkManager:
         receipt_fingerprints = {receipt.get("left_fingerprint"), receipt.get("right_fingerprint")}
         if peer_id not in receipt_ids or fingerprint not in receipt_fingerprints:
             raise ValueError("rekey identity does not match the signed receipt")
-        token_for_requester = secrets.token_urlsafe(32)
+        # Single shared token model (v1.2.7+): reuse the initiator's token
+        # for both directions, exactly like approve()/accept_pair_offer().
+        shared_token = _validate_token(request.get("token_for_remote"))
         self.state.save_peer({
             "peer_id": peer_id,
             "display_name": request.get("display_name"),
@@ -748,8 +754,8 @@ class NetworkManager:
             "cert_pem": cert_pem,
             "url": _validate_peer_url(request.get("url")),
             "platform": request.get("platform", "unknown"),
-            "inbound_token": token_for_requester,
-            "outbound_token": _validate_token(request.get("token_for_remote")),
+            "inbound_token": shared_token,
+            "outbound_token": shared_token,  # Single shared token (v1.2.7+)
             "receipt": receipt,
             "last_seen": _now(),
         })
@@ -758,7 +764,7 @@ class NetworkManager:
             "nonce": request["nonce"],
             "peer_id": self.identity.peer_id,
             "fingerprint": self.identity.fingerprint,
-            "token_for_requester": token_for_requester,
+            "token_for_requester": shared_token,
         }
         response["signature"] = self.identities.sign(response)
         return response
@@ -794,7 +800,7 @@ class NetworkManager:
         updated.update({
             "url": endpoint,
             "inbound_token": token_for_remote,
-            "outbound_token": accepted["token_for_requester"],
+            "outbound_token": token_for_remote,  # Single shared token (v1.2.7+)
             "last_seen": _now(),
         })
         return self.state.save_peer(updated)
