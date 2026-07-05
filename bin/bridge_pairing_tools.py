@@ -27,6 +27,11 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+try:
+    from mcp.server.fastmcp.prompts.base import UserMessage
+except ImportError:
+    pass
+
 
 def _hermes_home() -> Path:
     explicit = os.environ.get("HERMES_BRIDGE_HOME") or os.environ.get("HERMES_HOME")
@@ -413,3 +418,92 @@ def add_pairing_tools(mcp) -> None:
                 + " for the native TOFU pairing flow."
             ),
         })
+
+    try:
+        @mcp.prompt()
+        def manual_pair() -> list[UserMessage]:
+            """Pair with a device by IP address. Usage: /manual-pair <name> <ip> [port]"""
+            return [
+                UserMessage(
+                    content=(
+                        "This prompt initializes the manual pairing flow. "
+                        "Please ask your agent to:\n"
+                        "1. Call the MCP tool bridge_manual_pair with the provided arguments.\n"
+                        "2. Or load the agent-bridge-pairing skill and follow the manual-pair procedure.\n\n"
+                        "Tool: bridge_manual_pair\n"
+                        "Skill: agent-bridge-pairing\n"
+                        "Description: Pair with a device by IP address."
+                    )
+                )
+            ]
+
+        @mcp.prompt()
+        def discovery_pair() -> list[UserMessage]:
+            """Find and pair with a device via mDNS discovery. Usage: /discovery-pair [name]"""
+            return [
+                UserMessage(
+                    content=(
+                        "This prompt initializes the discovery pairing flow. "
+                        "Please ask your agent to:\n"
+                        "1. Call the MCP tool bridge_discovery_scan.\n"
+                        "2. Or load the agent-bridge-pairing skill and follow the discovery-pair procedure.\n\n"
+                        "Tool: bridge_discovery_scan\n"
+                        "Skill: agent-bridge-pairing\n"
+                        "Description: Find and pair with a device via mDNS discovery."
+                    )
+                )
+            ]
+
+        @mcp.prompt()
+        def tailscale_pair() -> list[UserMessage]:
+            """Find and pair with a device via Tailscale. Usage: /tailscale-pair [name]"""
+            return [
+                UserMessage(
+                    content=(
+                        "This prompt initializes the tailscale pairing flow. "
+                        "Please ask your agent to:\n"
+                        "1. Call the MCP tool bridge_discovery_scan.\n"
+                        "2. Or load the agent-bridge-pairing skill and follow the tailscale-pair procedure.\n\n"
+                        "Tool: bridge_discovery_scan\n"
+                        "Skill: agent-bridge-pairing\n"
+                        "Description: Find and pair with a device via Tailscale."
+                    )
+                )
+            ]
+
+        @mcp.prompt()
+        def pair_status() -> list[UserMessage]:
+            """Show status of all paired devices and discovery state."""
+            return [
+                UserMessage(
+                    content=(
+                        "This prompt checks the pairing status. "
+                        "Please ask your agent to:\n"
+                        "1. Call the MCP tool bridge_pair_status.\n"
+                        "2. Or load the agent-bridge-pairing skill and follow the pair-status procedure.\n\n"
+                        "Tool: bridge_pair_status\n"
+                        "Skill: agent-bridge-pairing\n"
+                        "Description: Show status of all paired devices and discovery state."
+                    )
+                )
+            ]
+
+        @mcp.prompt()
+        def repair() -> list[UserMessage]:
+            """Diagnose and repair a broken peer connection. Usage: /repair <peer-id>"""
+            return [
+                UserMessage(
+                    content=(
+                        "This prompt initializes the repair flow. "
+                        "Please ask your agent to:\n"
+                        "1. Call the MCP tool bridge_repair_peer with the provided peer-id argument.\n"
+                        "2. Or load the agent-bridge-pairing skill and follow the repair procedure.\n\n"
+                        "Tool: bridge_repair_peer\n"
+                        "Skill: agent-bridge-pairing\n"
+                        "Description: Diagnose and repair a broken peer connection."
+                    )
+                )
+            ]
+
+    except (ImportError, NameError):
+        pass # Prompts not supported
