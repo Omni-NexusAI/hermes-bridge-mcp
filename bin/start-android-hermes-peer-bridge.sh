@@ -36,8 +36,14 @@ if [ -n "${HERMES_BRIDGE_PAIR_KEY:-}" ] || [ -n "${HERMES_BRIDGE_AUTH_TOKEN:-}" 
   legacy_pid=$!
 fi
 
-"${PYTHON:-python}" "$REPO_ROOT/bin/windows-hermes-proxy-mcp.py" \
-  --transport "$HERMES_BRIDGE_TRANSPORT" --host "$HERMES_BRIDGE_HOST" \
-  --port "$HERMES_BRIDGE_SECURE_PORT" --secure-network &
-secure_pid=$!
-wait "$secure_pid"
+if [ "${HERMES_BRIDGE_AUTO_DISCOVERY:-1}" = "1" ]; then
+  "${PYTHON:-python}" "$REPO_ROOT/bin/windows-hermes-proxy-mcp.py" \
+    --transport "$HERMES_BRIDGE_TRANSPORT" --host "$HERMES_BRIDGE_HOST" \
+    --port "$HERMES_BRIDGE_SECURE_PORT" --secure-network &
+  secure_pid=$!
+  wait "$secure_pid"
+else
+  if [ -n "$legacy_pid" ]; then
+    wait "$legacy_pid"
+  fi
+fi

@@ -302,3 +302,64 @@ def test_two_sandboxed_https_peers_pair_delegate_recover_and_rekey(tmp_path):
         _stop_server(proc_a)
         if proc_b.poll() is None:
             _stop_server(proc_b)
+
+def test_pin_verification(tmp_path, monkeypatch):
+    import time
+    from bin.hermes_bridge_network import NetworkManager
+    manager = NetworkManager(tmp_path)
+    monkeypatch.setenv("HERMES_BRIDGE_PAIR_PIN", "MySecretPIN123")
+
+    # 1. Create a candidate
+    identity = manager.identity
+    candidate_doc = {
+        "peer_id": "test-remote-123",
+        "fingerprint": identity.fingerprint,
+        "url": "https://127.0.0.1:18443/mcp",
+    }
+    manager.state.ingest_candidate(candidate_doc)
+
+    # 2. Mock fetch_identity to simulate the remote fetching
+    manager._fetch_identity = lambda c: candidate_doc
+
+    # 3. Create a valid mock offer with correct PIN
+    offer = {
+        "protocol_version": "1",
+        "approved": True,
+        "nonce": "test-nonce-1-which-is-long-enough",
+        "expires_at": time.time() + 300,
+        "peer_id": "test-remote-123",
+        "display_name": "Test Remote",
+        "fingerprint": identity.fingerprint,
+        "cert_pem": identity.cert_pem,
+        "url": "https://127.0.0.1:28443/mcp",
+        "token_for_remote": "tokentokentokentokentokentokentoken",
+        "pin": "MySecretPIN123",
+        "receipt": {
+            "version": 1,
+            "left_peer_id": "test-remote-123",
+            "left_fingerprint": identity.fingerprint,
+            "right_peer_id": identity.peer_id,
+            "right_fingerprint": identity.fingerprint,
+            "created_at": time.time(),
+            "epoch": "abc123def456",
+        }
+    }
+    offer["receipt"]["right_signature"] = manager.identities.sign(offer["receipt"])
+    offer["receipt_signature"] = offer["receipt"]["right_signature"] # Mock valid signature
+    offer["signature"] = manager.identities.sign(offer) # Mock valid signature
+
+    # Needs to bypass the strict signature verification for this mock test
+    # since we don't have the actual remote cert to sign with
+    monkeypatch.setattr("bin.hermes_bridge_network._verify_signature", lambda *args, **kwargs: None)
+
+    # This should succeed since the PIN is correct
+    manager.accept_pair_offer(offer)
+
+    # Now try with a wrong PIN
+    offer2 = dict(offer)
+    offer2["pin"] = "WrongPIN"
+    offer2["nonce"] = "test-nonce-2-which-is-long-enough"
+
+    import pytest
+    with pytest.raises(ValueError, match="pairing request provided an invalid PIN"):
+        manager.accept_pair_offer(offer2)

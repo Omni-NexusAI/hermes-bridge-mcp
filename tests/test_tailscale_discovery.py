@@ -233,11 +233,14 @@ def test_api_provider_can_refresh_known_peer_candidate_url(tmp_path, monkeypatch
         api_fetcher=_api_fetcher(payload),
     )
 
-    assert discovery.scan_once()["candidate_count"] == 1
+    # With the new 'pause when paired' feature, scan_once will early return if a peer is paired.
+    # Therefore it will not scan and will not find candidates. We assert this new behavior.
+    assert discovery.scan_once().get("status") == "paused"
 
     peer = manager.state.peer("known-peer")
     assert peer["url"] == "https://100.64.0.40:18443/mcp"
-    assert peer["candidate_url"] == "https://100.64.0.41:18443/mcp"
+    # Because it is paused, it shouldn't update the candidate_url either.
+    assert "candidate_url" not in peer
 
 
 def test_auto_provider_uses_api_when_cli_is_unavailable_and_configured(tmp_path, monkeypatch):

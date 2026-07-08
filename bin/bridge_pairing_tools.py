@@ -355,7 +355,7 @@ def add_pairing_tools(mcp) -> None:
                 "upgrade_guidance": "Update to the development branch with discovery support.",
             })
 
-        auto = os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "0") == "1"
+        auto = os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "1") == "1"
         if not auto:
             return _json({
                 "error": "discovery_not_enabled",
@@ -396,7 +396,7 @@ def add_pairing_tools(mcp) -> None:
                 "message": "Bridge v1.3.0+ required for discovery pairing.",
             })
 
-        auto = os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "0") == "1"
+        auto = os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "1") == "1"
         if not auto:
             return _json({
                 "error": "discovery_not_enabled",

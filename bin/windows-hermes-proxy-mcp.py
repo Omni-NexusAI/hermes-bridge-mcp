@@ -1373,7 +1373,7 @@ def main() -> None:
             discovery = None
             recovery = RecoveryWorker(manager, float(os.environ.get("HERMES_BRIDGE_RECOVERY_INTERVAL", "30")))
             recovery.start()
-            if os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "0") == "1":
+            if os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "1") == "1":
                 backend = os.environ.get("HERMES_BRIDGE_DISCOVERY_BACKEND", "mdns")
                 if backend == "mdns":
                     discovery = MdnsDiscovery(manager, args.host, args.port)

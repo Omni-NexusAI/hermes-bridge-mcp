@@ -545,7 +545,7 @@ class NetworkManager:
             "display_name": identity.display_name,
             "identity_fingerprint": identity.fingerprint,
             "secure_port": self.secure_port,
-            "discovery_enabled": os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "0") == "1",
+            "discovery_enabled": os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "1") == "1",
             "discovery_backend": os.environ.get("HERMES_BRIDGE_DISCOVERY_BACKEND", "mdns"),
             "discovery_namespace": os.environ.get("HERMES_BRIDGE_DISCOVERY_NAMESPACE", "production"),
             "tailscale_advertise_address_configured": bool(
@@ -636,6 +636,7 @@ class NetworkManager:
             "platform": platform.system().lower() or "unknown",
             "url": self._advertised_url(),
             "token_for_remote": token_for_remote,
+            "pin": os.environ.get("HERMES_BRIDGE_PAIR_PIN", ""),
             "receipt": receipt,
             "receipt_signature": self.identities.sign(receipt),
         }
@@ -676,6 +677,10 @@ class NetworkManager:
             raise ValueError("pairing certificate fingerprint mismatch")
         if offer.get("approved") is not True:
             raise ValueError("pairing request lacks explicit approval")
+        expected_pin = os.environ.get("HERMES_BRIDGE_PAIR_PIN")
+        offer_pin = offer.get("pin", "")
+        if expected_pin and offer_pin != expected_pin:
+            raise ValueError("pairing request provided an invalid PIN")
         _verify_signature(cert_pem, offer, signature)
         self.state.consume_nonce(str(offer.get("nonce") or ""), float(offer.get("expires_at") or 0))
         peer_id = _safe_peer_id(offer.get("peer_id"))
@@ -713,6 +718,7 @@ class NetworkManager:
             "token_for_initiator": shared_token,  # Same token both directions
             "receipt_signature": right_signature,
         }
+        response["url"] = self._advertised_url()
         response["signature"] = self.identities.sign(response)
         return response
 
@@ -735,6 +741,10 @@ class NetworkManager:
         fingerprint = _fingerprint_cert(cert_pem)
         if fingerprint != request.get("fingerprint"):
             raise ValueError("rekey certificate fingerprint mismatch")
+        expected_pin = os.environ.get("HERMES_BRIDGE_PAIR_PIN")
+        request_pin = request.get("pin", "")
+        if expected_pin and request_pin != expected_pin:
+            raise ValueError("rekey request provided an invalid PIN")
         _verify_signature(cert_pem, request, signature)
         self.state.consume_nonce(str(request.get("nonce") or ""), float(request.get("expires_at") or 0))
         peer_id = _safe_peer_id(request.get("peer_id"))
@@ -766,6 +776,7 @@ class NetworkManager:
             "fingerprint": self.identity.fingerprint,
             "token_for_requester": shared_token,
         }
+        response["url"] = self._advertised_url()
         response["signature"] = self.identities.sign(response)
         return response
 
@@ -783,6 +794,7 @@ class NetworkManager:
             "platform": platform.system().lower() or "unknown",
             "url": self._advertised_url(),
             "token_for_remote": token_for_remote,
+            "pin": os.environ.get("HERMES_BRIDGE_PAIR_PIN", ""),
             "receipt": peer["receipt"],
         }
         request["signature"] = self.identities.sign(request)
@@ -1208,6 +1220,11 @@ class TailscaleDiscovery:
         return eligible[:MAX_TAILSCALE_DISCOVERY_PEERS]
 
     def scan_once(self) -> dict[str, Any]:
+        if len(self.manager.state.public_status()["paired_peers"]) > 0:
+            with self._health_lock:
+                self._health["status"] = "paused"
+                self._health["message"] = "Paused because a peer is already paired"
+            return self.public_status()
         scan_at = _now()
         try:
             status, provider = self._load_inventory()
@@ -1345,6 +1362,9 @@ class MdnsDiscovery:
         self.zeroconf = None
         self.browser = None
         self.info = None
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.registered = False
 
     def start(self) -> None:
         if os.environ.get("HERMES_BRIDGE_TEST_SANDBOX") == "1":
@@ -1374,7 +1394,6 @@ class MdnsDiscovery:
             server=f"{identity.peer_id}.local.",
         )
         self.zeroconf = Zeroconf()
-        self.zeroconf.register_service(self.info)
 
         manager = self.manager
 
@@ -1407,6 +1426,23 @@ class MdnsDiscovery:
                 return
 
         self.browser = ServiceBrowser(self.zeroconf, PRODUCTION_MDNS_TYPE, Listener())
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._run, name="hermes-bridge-mdns-watchdog", daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        import contextlib
+        while not self.stop_event.is_set():
+            has_peers = len(self.manager.state.public_status()["paired_peers"]) > 0
+            if has_peers and self.registered:
+                with contextlib.suppress(Exception):
+                    self.zeroconf.unregister_service(self.info)
+                self.registered = False
+            elif not has_peers and not self.registered:
+                with contextlib.suppress(Exception):
+                    self.zeroconf.register_service(self.info)
+                self.registered = True
+            self.stop_event.wait(5.0)
 
     def stop(self) -> None:
         if self.zeroconf:
@@ -1459,7 +1495,7 @@ def runtime_plan(state_dir: Path, host: str, legacy_port: int, secure_port: int)
         "host": host,
         "legacy_http_port": int(legacy_port),
         "secure_https_port": int(secure_port),
-        "discovery_enabled": os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "0") == "1",
+        "discovery_enabled": os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "1") == "1",
         "discovery_backend": os.environ.get("HERMES_BRIDGE_DISCOVERY_BACKEND", "mdns"),
         "discovery_namespace": os.environ.get("HERMES_BRIDGE_DISCOVERY_NAMESPACE", "production"),
         "isolation": isolation,
