@@ -77,6 +77,23 @@ def _validate_peer_url(value: Any) -> str:
     return url
 
 
+def _validate_remote_peer_url(value: Any) -> str:
+    """Accept a peer callback endpoint only when it cannot target this host.
+
+    Loopback is valid in the isolated test harness but never for a production
+    pairing offer: persisting it creates a successful-looking one-way pair.
+    """
+    url = _validate_peer_url(value)
+    host = urlparse(url).hostname or ""
+    try:
+        if ipaddress.ip_address(host).is_loopback and os.environ.get("HERMES_BRIDGE_TEST_SANDBOX") != "1":
+            raise ValueError("remote pairing endpoint must not use a loopback address")
+    except ValueError as exc:
+        if "loopback" in str(exc):
+            raise
+    return url
+
+
 def _validate_token(value: Any) -> str:
     token = str(value or "")
     if len(token) < 32 or len(token) > 256:
@@ -297,6 +314,7 @@ def _empty_network_state() -> dict[str, Any]:
         "rejected": {},
         "revoked": {},
         "used_nonces": {},
+        "approval_windows": {},
     }
 
 
@@ -321,12 +339,16 @@ class PairingState:
         data.setdefault("rejected", {})
         data.setdefault("revoked", {})
         data.setdefault("used_nonces", {})
+        data.setdefault("approval_windows", {})
         for key, value in list(data["candidates"].items()):
             if float(value.get("expires_at", 0)) < now:
                 data["candidates"].pop(key, None)
         for key, expiry in list(data["used_nonces"].items()):
             if float(expiry) < now:
                 data["used_nonces"].pop(key, None)
+        for key, window in list(data["approval_windows"].items()):
+            if float(window.get("expires_at", 0)) < now:
+                data["approval_windows"].pop(key, None)
 
     def snapshot(self) -> dict[str, Any]:
         data = self.store.read()
@@ -478,6 +500,27 @@ class PairingState:
     def inbound_tokens(self) -> list[str]:
         return [str(peer["inbound_token"]) for peer in self.snapshot()["peers"].values() if peer.get("inbound_token")]
 
+    def open_approval_window(self, peer_id: str, fingerprint: str, ttl_seconds: int = 300) -> dict[str, Any]:
+        peer_id = _safe_peer_id(peer_id)
+        fingerprint = str(fingerprint or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise ValueError("expected_fingerprint must be SHA-256 hex")
+        expires_at = _now() + max(30, min(int(ttl_seconds), PAIR_REQUEST_TTL_SECONDS))
+        def update(data: dict[str, Any]):
+            self._prune(data)
+            data["approval_windows"][f"{peer_id}:{fingerprint}"] = {"expires_at": expires_at}
+            return {"status": "open", "peer_id": peer_id, "fingerprint": fingerprint, "expires_at": expires_at}
+        return self.store.mutate(update)
+
+    def consume_approval_window(self, peer_id: str, fingerprint: str) -> None:
+        key = f"{_safe_peer_id(peer_id)}:{str(fingerprint).lower()}"
+        def update(data: dict[str, Any]):
+            self._prune(data)
+            if key not in data["approval_windows"]:
+                raise ValueError("no active approval window matches this identity")
+            data["approval_windows"].pop(key, None)
+        self.store.mutate(update)
+
     def public_status(self) -> dict[str, Any]:
         data = self.snapshot()
         peers = []
@@ -545,7 +588,7 @@ class NetworkManager:
             "display_name": identity.display_name,
             "identity_fingerprint": identity.fingerprint,
             "secure_port": self.secure_port,
-            "discovery_enabled": os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "0") == "1",
+            "discovery_enabled": os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "1") != "0",
             "discovery_backend": os.environ.get("HERMES_BRIDGE_DISCOVERY_BACKEND", "mdns"),
             "discovery_namespace": os.environ.get("HERMES_BRIDGE_DISCOVERY_NAMESPACE", "production"),
             "tailscale_advertise_address_configured": bool(
@@ -560,9 +603,10 @@ class NetworkManager:
         self._discovery_status_provider = provider
 
     def set_runtime_advertise_address(self, address: str) -> None:
-        if not _is_tailscale_ip(address):
-            raise ValueError("runtime advertise address must be a Tailscale IP")
-        self._runtime_advertise_address = str(ipaddress.ip_address(address))
+        parsed = ipaddress.ip_address(address)
+        if parsed.is_loopback or parsed.is_unspecified:
+            raise ValueError("runtime advertise address must be routable")
+        self._runtime_advertise_address = str(parsed)
 
     def managed_peer_config(self) -> dict[str, dict[str, Any]]:
         return {
@@ -650,6 +694,10 @@ class NetworkManager:
         _verify_signature(remote["cert_pem"], accepted, accepted_signature)
         if accepted.get("nonce") != offer["nonce"] or accepted.get("status") != "paired":
             raise ValueError("remote pairing response did not match the approved request")
+        responder_url = _validate_remote_peer_url(accepted.get("url"))
+        responder_identity = self.inspect_identity(responder_url)
+        if responder_identity.get("fingerprint") != remote["fingerprint"]:
+            raise ValueError("remote pairing response advertised an endpoint for another identity")
         final_receipt = dict(receipt)
         final_receipt["left_signature"] = offer["receipt_signature"]
         final_receipt["right_signature"] = accepted["receipt_signature"]
@@ -658,7 +706,7 @@ class NetworkManager:
             "display_name": remote.get("display_name"),
             "fingerprint": remote["fingerprint"],
             "cert_pem": remote["cert_pem"],
-            "url": candidate["url"],
+            "url": responder_url,
             "platform": remote.get("platform", "unknown"),
             "inbound_token": token_for_remote,
             "outbound_token": token_for_remote,  # Single shared token (v1.2.7+)
@@ -698,7 +746,7 @@ class NetworkManager:
             "display_name": offer.get("display_name"),
             "fingerprint": fingerprint,
             "cert_pem": cert_pem,
-            "url": _validate_peer_url(offer.get("url")),
+            "url": _validate_remote_peer_url(offer.get("url")),
             "platform": offer.get("platform", "unknown"),
             "inbound_token": shared_token,
             "outbound_token": shared_token,  # Single shared token (v1.2.7+)
@@ -712,6 +760,7 @@ class NetworkManager:
             "fingerprint": self.identity.fingerprint,
             "token_for_initiator": shared_token,  # Same token both directions
             "receipt_signature": right_signature,
+            "url": self._advertised_url(),
         }
         response["signature"] = self.identities.sign(response)
         return response
@@ -823,8 +872,22 @@ class NetworkManager:
             return self._public_pair_result(peer, "reconnect_scheduled")
         raise ValueError("action must be approve, reject, revoke, or reconnect")
 
+    def pairing_window(self, action: str, peer_id: str, expected_fingerprint: str, ttl_seconds: int = 300) -> dict[str, Any]:
+        action = str(action or "").lower()
+        if action == "open":
+            return self.state.open_approval_window(peer_id, expected_fingerprint, ttl_seconds)
+        if action == "approve":
+            self.state.consume_approval_window(peer_id, expected_fingerprint)
+            return self.approve(peer_id, expected_fingerprint)
+        raise ValueError("action must be open or approve")
+
     def _advertised_url(self) -> str:
-        address = os.environ.get("HERMES_BRIDGE_ADVERTISE_ADDRESS") or self._runtime_advertise_address or "127.0.0.1"
+        address = os.environ.get("HERMES_BRIDGE_ADVERTISE_ADDRESS") or self._runtime_advertise_address
+        if not address:
+            if os.environ.get("HERMES_BRIDGE_TEST_SANDBOX") == "1":
+                address = "127.0.0.1"
+            else:
+                raise ValueError("no routable advertised address is available")
         try:
             address = _url_host(address)
         except ValueError:
@@ -1355,6 +1418,7 @@ class MdnsDiscovery:
             raise RuntimeError("zeroconf is required when automatic discovery is enabled") from exc
         identity = self.manager.identity
         address = os.environ.get("HERMES_BRIDGE_ADVERTISE_ADDRESS") or self._select_address()
+        self.manager.set_runtime_advertise_address(address)
         properties = {
             "protocol": NETWORK_PROTOCOL_VERSION,
             "peer_id": identity.peer_id,
@@ -1459,7 +1523,7 @@ def runtime_plan(state_dir: Path, host: str, legacy_port: int, secure_port: int)
         "host": host,
         "legacy_http_port": int(legacy_port),
         "secure_https_port": int(secure_port),
-        "discovery_enabled": os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "0") == "1",
+        "discovery_enabled": os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "1") != "0",
         "discovery_backend": os.environ.get("HERMES_BRIDGE_DISCOVERY_BACKEND", "mdns"),
         "discovery_namespace": os.environ.get("HERMES_BRIDGE_DISCOVERY_NAMESPACE", "production"),
         "isolation": isolation,
