@@ -182,7 +182,20 @@ npm install -g supergateway
 
 ## Install
 
-From this repository on Windows:
+From this repository on any supported platform, install the complete bridge
+payload without altering existing pairing or agent configuration:
+
+```text
+python bootstrap.py install --start
+python bootstrap.py doctor --json
+```
+
+The bootstrap keeps releases under the local Hermes home, preserves
+`bridge-state` and `peers.json`, and supports `rollback`. It installs bridge
+dependencies in its own virtual environment but intentionally does not install
+or update Hermes itself. Use `--no-deps` for an offline staging pass.
+
+From this repository on Windows, the legacy convenience wrapper remains:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1

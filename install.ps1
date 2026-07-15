@@ -23,6 +23,7 @@ $binFiles = @(
     "hermes-bridge-mcp-serve.cmd",
     "start-hermes-bridge-peer.ps1",
     "hermes_bridge_network.py",
+    "bridge_pairing_tools.py",
     "windows-hermes-proxy-mcp.py",
     "windows-hermes-mcp-serve.cmd",
     "start-windows-hermes-bridge.ps1",

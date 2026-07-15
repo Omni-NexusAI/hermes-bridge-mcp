@@ -7,7 +7,7 @@ $LogDir = Join-Path $HermesHome "logs"
 $HostAddress = if ($env:HERMES_BRIDGE_HOST) { $env:HERMES_BRIDGE_HOST } else { "0.0.0.0" }
 $LegacyPort = if ($env:HERMES_BRIDGE_PORT) { [int]$env:HERMES_BRIDGE_PORT } else { 18084 }
 $SecurePort = if ($env:HERMES_BRIDGE_SECURE_PORT) { [int]$env:HERMES_BRIDGE_SECURE_PORT } else { 18443 }
-$DiscoveryEnabled = $env:HERMES_BRIDGE_AUTO_DISCOVERY -eq "1"
+$DiscoveryEnabled = $env:HERMES_BRIDGE_AUTO_DISCOVERY -ne "0"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -53,4 +53,8 @@ if ($env:HERMES_BRIDGE_PAIR_KEY -or $env:HERMES_BRIDGE_AUTH_TOKEN) {
     Write-Output "INFO: legacy HTTP peer listener skipped because no shared pair key is configured"
 }
 
-Start-BridgeProcess -Name "windows-secure-peer-bridge" -Port $SecurePort -Secure
+if ($DiscoveryEnabled) {
+    Start-BridgeProcess -Name "windows-secure-peer-bridge" -Port $SecurePort -Secure
+} else {
+    Write-Output "INFO: secure discovery listener disabled by HERMES_BRIDGE_AUTO_DISCOVERY=0"
+}

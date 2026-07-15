@@ -1226,6 +1226,42 @@ def add_bridge_tools(mcp):
             })
 
     @mcp.tool()
+    def bridge_pairing_window(action: str, peer_id: str, expected_fingerprint: str, ttl_seconds: int = 300) -> str:
+        """Open a short-lived, fingerprint-bound approval window, then approve that exact candidate."""
+        try:
+            return _json(_network_manager().pairing_window(action, peer_id, expected_fingerprint, ttl_seconds))
+        except Exception as exc:
+            return _json({"error": str(exc), "error_type": type(exc).__name__, "action": action, "peer_id": peer_id})
+
+    @mcp.tool()
+    def bridge_peer_diagnostics(peer_id: str, include_hermes_probe: bool = False) -> str:
+        """Compare this bridge's peer configuration with the remote bridge's sanitized status.
+
+        This is intended for Codex and other MCP clients: it uses the normal
+        pinned peer route, never exposes a credential, and can optionally ask
+        the remote Hermes bridge for its readiness status.
+        """
+        try:
+            local_peer, error = _get_peer(peer_id)
+            if not local_peer:
+                return _json({"peer_id": peer_id, "reachable": False, "error": error})
+            remote = _peer_call(peer_id, "bridge_agent_status", {})
+            result = {
+                "peer_id": peer_id,
+                "reachable": True,
+                "managed": bool(local_peer.get("managed")),
+                "certificate_pinned": bool(local_peer.get("cert_pem")),
+                "credential_configured": bool(local_peer.get("token") or local_peer.get("pair_key") or local_peer.get("token_env") or local_peer.get("pair_key_env")),
+                "remote_bridge_version": remote.get("bridge_version"),
+                "remote_hermes_available": remote.get("hermes_available"),
+            }
+            if include_hermes_probe:
+                result["remote_hermes_status"] = remote.get("hermes_version") or "reported-unavailable"
+            return _json(result)
+        except Exception as exc:
+            return _json({"peer_id": peer_id, "reachable": False, "error_type": type(exc).__name__, "error": str(exc)})
+
+    @mcp.tool()
     def bridge_agent_status() -> str:
         """Local bridge only: report this machine's Hermes Bridge status, configured peers, and routing guidance."""
         return windows_agent_status()
@@ -1373,7 +1409,7 @@ def main() -> None:
             discovery = None
             recovery = RecoveryWorker(manager, float(os.environ.get("HERMES_BRIDGE_RECOVERY_INTERVAL", "30")))
             recovery.start()
-            if os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "0") == "1":
+            if os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "1") != "0":
                 backend = os.environ.get("HERMES_BRIDGE_DISCOVERY_BACKEND", "mdns")
                 if backend == "mdns":
                     discovery = MdnsDiscovery(manager, args.host, args.port)
