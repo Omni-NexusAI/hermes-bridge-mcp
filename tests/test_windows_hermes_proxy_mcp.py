@@ -55,6 +55,10 @@ def test_a0_config_helper_uses_universal_bridge_settings():
     assert "messenger gateway" in entry["description"]
     assert "windows-hermes" not in servers
 
+    updated, _ = module.configure({}, "hermes-bridge", module.DEFAULT_URL, "secret-token")
+    authenticated = json.loads(updated["mcp_servers"])["mcpServers"]["hermes-bridge"]
+    assert authenticated["headers"]["Authorization"] == "Bearer secret-token"
+
 
 def test_messaging_gateway_artifacts_are_not_shipped():
     root = Path(__file__).resolve().parents[1]
@@ -329,9 +333,9 @@ def test_bridge_agent_status_reports_bridge_version(monkeypatch):
 
     status = asyncio.run(call_status())
 
-    assert module.BRIDGE_VERSION == "v1.3.0"
+    assert module.BRIDGE_VERSION == "v1.3.1"
     assert module.MIN_COMPATIBLE_BRIDGE_VERSION == "v1.2.7"
-    assert status["bridge_version"] == "v1.3.0"
+    assert status["bridge_version"] == "v1.3.1"
     assert status["min_compatible_bridge_version"] == "v1.2.7"
     assert "Versions >= v1.2.7" in status["compatibility_policy"]
     assert status["hermes_version"] == "hermes-runtime"

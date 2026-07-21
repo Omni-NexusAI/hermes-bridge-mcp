@@ -308,13 +308,14 @@ class IdentityStore:
 
 def _empty_network_state() -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "peers": {},
         "candidates": {},
         "rejected": {},
         "revoked": {},
         "used_nonces": {},
         "approval_windows": {},
+        "unpair_transactions": {},
     }
 
 
@@ -340,6 +341,7 @@ class PairingState:
         data.setdefault("revoked", {})
         data.setdefault("used_nonces", {})
         data.setdefault("approval_windows", {})
+        data.setdefault("unpair_transactions", {})
         for key, value in list(data["candidates"].items()):
             if float(value.get("expires_at", 0)) < now:
                 data["candidates"].pop(key, None)
@@ -349,6 +351,13 @@ class PairingState:
         for key, window in list(data["approval_windows"].items()):
             if float(window.get("expires_at", 0)) < now:
                 data["approval_windows"].pop(key, None)
+        # Completed transactions are non-secret audit tombstones. Keep them
+        # long enough to make retries idempotent, then prune them so peer state
+        # cannot accumulate forever.
+        for key, transaction in list(data["unpair_transactions"].items()):
+            completed_at = float(transaction.get("completed_at", 0) or 0)
+            if completed_at and completed_at < now - 30 * 24 * 60 * 60:
+                data["unpair_transactions"].pop(key, None)
 
     def snapshot(self) -> dict[str, Any]:
         data = self.store.read()
@@ -498,7 +507,142 @@ class PairingState:
         return self.snapshot()["peers"].get(_safe_peer_id(peer_id))
 
     def inbound_tokens(self) -> list[str]:
-        return [str(peer["inbound_token"]) for peer in self.snapshot()["peers"].values() if peer.get("inbound_token")]
+        return [
+            str(peer["inbound_token"])
+            for peer in self.snapshot()["peers"].values()
+            if peer.get("inbound_token") and peer.get("status", "paired") == "paired"
+        ]
+
+    @staticmethod
+    def _cleanup_peer_data(data: dict[str, Any], peer_id: str, fingerprint: str) -> dict[str, int]:
+        removed = {
+            "managed_peer": int(data["peers"].pop(peer_id, None) is not None),
+            "candidates": 0,
+            "rejected": int(data["rejected"].pop(peer_id, None) is not None),
+            "approval_windows": 0,
+        }
+        for key, candidate in list(data["candidates"].items()):
+            if candidate.get("peer_id") == peer_id or candidate.get("fingerprint") == fingerprint:
+                data["candidates"].pop(key, None)
+                removed["candidates"] += 1
+        for key in list(data["approval_windows"]):
+            if key.startswith(f"{peer_id}:") or key.endswith(f":{fingerprint}"):
+                data["approval_windows"].pop(key, None)
+                removed["approval_windows"] += 1
+        return removed
+
+    def preview_unpair(self, peer_id: str, expected_fingerprint: Optional[str] = None) -> dict[str, Any]:
+        peer_id = _safe_peer_id(peer_id)
+        data = self.snapshot()
+        peer = data["peers"].get(peer_id)
+        if not peer:
+            raise ValueError(f"paired peer not found: {peer_id}")
+        fingerprint = str(peer.get("fingerprint") or "").lower()
+        if expected_fingerprint and fingerprint != str(expected_fingerprint).lower():
+            raise ValueError("expected fingerprint does not match the paired identity")
+        return {
+            "peer_id": peer_id,
+            "fingerprint": fingerprint,
+            "url": peer.get("url"),
+            "managed_peer": True,
+            "candidate_count": sum(
+                1 for candidate in data["candidates"].values()
+                if candidate.get("peer_id") == peer_id or candidate.get("fingerprint") == fingerprint
+            ),
+            "approval_window_count": sum(
+                1 for key in data["approval_windows"]
+                if key.startswith(f"{peer_id}:") or key.endswith(f":{fingerprint}")
+            ),
+            "rejected_record": peer_id in data["rejected"],
+        }
+
+    def pending_unpair(self, peer_id: str) -> Optional[dict[str, Any]]:
+        peer_id = _safe_peer_id(peer_id)
+        transactions = self.snapshot()["unpair_transactions"]
+        pending = [
+            dict(item) for item in transactions.values()
+            if item.get("peer_id") == peer_id and item.get("status") == "prepared"
+        ]
+        pending.sort(key=lambda item: float(item.get("created_at", 0)), reverse=True)
+        return pending[0] if pending else None
+
+    def prepare_unpair(
+        self,
+        peer_id: str,
+        expected_fingerprint: str,
+        transaction_id: str,
+        initiated_by: str,
+    ) -> dict[str, Any]:
+        peer_id = _safe_peer_id(peer_id)
+        expected_fingerprint = str(expected_fingerprint or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_fingerprint):
+            raise ValueError("expected_fingerprint must be SHA-256 hex")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{24,128}", str(transaction_id or "")):
+            raise ValueError("invalid unpair transaction id")
+
+        def update(data: dict[str, Any]):
+            self._prune(data)
+            existing_transaction = data["unpair_transactions"].get(transaction_id)
+            if existing_transaction:
+                if existing_transaction.get("peer_id") != peer_id or existing_transaction.get("fingerprint") != expected_fingerprint:
+                    raise ValueError("unpair transaction does not match this peer")
+                return dict(existing_transaction)
+            peer = data["peers"].get(peer_id)
+            if not peer:
+                raise ValueError(f"paired peer not found: {peer_id}")
+            if peer.get("fingerprint") != expected_fingerprint:
+                raise ValueError("expected fingerprint does not match the paired identity")
+            peer["status"] = "unpairing"
+            peer["updated_at"] = _now()
+            transaction = {
+                "transaction_id": transaction_id,
+                "peer_id": peer_id,
+                "fingerprint": expected_fingerprint,
+                "status": "prepared",
+                "initiated_by": _safe_peer_id(initiated_by),
+                "created_at": _now(),
+            }
+            data["unpair_transactions"][transaction_id] = transaction
+            return dict(transaction)
+
+        return self.store.mutate(update)
+
+    def commit_unpair(self, transaction_id: str, peer_id: str, expected_fingerprint: str, scope: str = "both") -> dict[str, Any]:
+        peer_id = _safe_peer_id(peer_id)
+        expected_fingerprint = str(expected_fingerprint or "").lower()
+
+        def update(data: dict[str, Any]):
+            self._prune(data)
+            transaction = data["unpair_transactions"].get(transaction_id)
+            if transaction and transaction.get("status") in {"committed", "local_only"}:
+                return dict(transaction)
+            if not transaction:
+                transaction = {
+                    "transaction_id": transaction_id,
+                    "peer_id": peer_id,
+                    "fingerprint": expected_fingerprint,
+                    "status": "prepared",
+                    "initiated_by": "local",
+                    "created_at": _now(),
+                }
+            if transaction.get("peer_id") != peer_id or transaction.get("fingerprint") != expected_fingerprint:
+                raise ValueError("unpair transaction does not match this peer")
+            removed = self._cleanup_peer_data(data, peer_id, expected_fingerprint)
+            transaction = {
+                "transaction_id": transaction_id,
+                "peer_id": peer_id,
+                "fingerprint": expected_fingerprint,
+                "status": "local_only" if scope == "local" else "committed",
+                "scope": scope,
+                "remote_cleanup_confirmed": scope != "local",
+                "created_at": transaction.get("created_at", _now()),
+                "completed_at": _now(),
+                "cleanup": removed,
+            }
+            data["unpair_transactions"][transaction_id] = transaction
+            return dict(transaction)
+
+        return self.store.mutate(update)
 
     def open_approval_window(self, peer_id: str, fingerprint: str, ttl_seconds: int = 300) -> dict[str, Any]:
         peer_id = _safe_peer_id(peer_id)
@@ -541,6 +685,23 @@ class PairingState:
             "paired_peers": sorted(peers, key=lambda item: item["peer_id"] or ""),
             "candidates": sorted(data["candidates"].values(), key=lambda item: item.get("peer_id", "")),
             "revoked_fingerprints": sorted(data["revoked"].keys()),
+            "unpair_transactions": sorted(
+                [
+                    {
+                        "transaction_id": item.get("transaction_id"),
+                        "peer_id": item.get("peer_id"),
+                        "fingerprint": item.get("fingerprint"),
+                        "status": item.get("status"),
+                        "remote_cleanup_confirmed": item.get("remote_cleanup_confirmed"),
+                        "created_at": item.get("created_at"),
+                        "completed_at": item.get("completed_at"),
+                        "cleanup": item.get("cleanup", {}),
+                    }
+                    for item in data["unpair_transactions"].values()
+                ],
+                key=lambda item: float(item.get("created_at") or 0),
+                reverse=True,
+            ),
         }
 
 
@@ -559,6 +720,7 @@ class NetworkManager:
         self.secure_port = int(secure_port)
         self._runtime_advertise_address: Optional[str] = None
         self._discovery_status_provider: Optional[Callable[[], dict[str, Any]]] = None
+        self._artifact_cleanup: Optional[Callable[[str, str, bool], dict[str, Any]]] = None
 
     @property
     def identity(self) -> DeviceIdentity:
@@ -602,6 +764,9 @@ class NetworkManager:
     def set_discovery_status_provider(self, provider: Callable[[], dict[str, Any]]) -> None:
         self._discovery_status_provider = provider
 
+    def set_artifact_cleanup(self, callback: Callable[[str, str, bool], dict[str, Any]]) -> None:
+        self._artifact_cleanup = callback
+
     def set_runtime_advertise_address(self, address: str) -> None:
         parsed = ipaddress.ip_address(address)
         if parsed.is_loopback or parsed.is_unspecified:
@@ -620,6 +785,7 @@ class NetworkManager:
                 "managed": True,
             }
             for peer_id, peer in self.state.snapshot()["peers"].items()
+            if peer.get("status", "paired") == "paired"
         }
 
     def inspect_identity(self, url: str, timeout: float = 10.0) -> dict[str, Any]:
@@ -814,6 +980,7 @@ class NetworkManager:
             "peer_id": self.identity.peer_id,
             "fingerprint": self.identity.fingerprint,
             "token_for_requester": shared_token,
+            "url": self._advertised_url(),
         }
         response["signature"] = self.identities.sign(response)
         return response
@@ -845,14 +1012,166 @@ class NetworkManager:
         _verify_signature(peer["cert_pem"], accepted, accepted_signature)
         if accepted.get("nonce") != request["nonce"] or accepted.get("status") != "rekeyed":
             raise ValueError("remote rekey response did not match the request")
+        responder_url = _validate_remote_peer_url(accepted.get("url"))
+        responder_identity = self.inspect_identity(responder_url)
+        if responder_identity.get("fingerprint") != peer.get("fingerprint"):
+            raise ValueError("remote rekey response advertised an endpoint for another identity")
         updated = dict(peer)
         updated.update({
-            "url": endpoint,
+            "url": responder_url,
             "inbound_token": token_for_remote,
             "outbound_token": token_for_remote,  # Single shared token (v1.2.7+)
             "last_seen": _now(),
         })
         return self.state.save_peer(updated)
+
+    def _verify_unpair_request(self, request: dict[str, Any], bearer_token: str, allow_committed: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+        payload = dict(request)
+        signature = str(payload.pop("signature", ""))
+        peer_id = _safe_peer_id(payload.get("peer_id"))
+        fingerprint = str(payload.get("fingerprint") or "").lower()
+        cert_pem = str(payload.get("cert_pem") or "")
+        transaction_id = str(payload.get("transaction_id") or "")
+        if _fingerprint_cert(cert_pem) != fingerprint:
+            raise ValueError("unpair certificate fingerprint mismatch")
+        _verify_signature(cert_pem, payload, signature)
+        if payload.get("target_peer_id") != self.identity.peer_id or payload.get("target_fingerprint") != self.identity.fingerprint:
+            raise ValueError("unpair request is not addressed to this identity")
+        transaction = self.state.snapshot()["unpair_transactions"].get(transaction_id)
+        if allow_committed and transaction and transaction.get("status") == "committed":
+            if transaction.get("peer_id") != peer_id or transaction.get("fingerprint") != fingerprint:
+                raise ValueError("unpair transaction does not match the signed identity")
+            return payload, transaction
+        peer = self.state.peer(peer_id)
+        if not peer or peer.get("fingerprint") != fingerprint or peer.get("cert_pem") != cert_pem:
+            raise ValueError("unpair identity is not the currently paired peer")
+        token = str(bearer_token or "")
+        if not token or not secrets.compare_digest(token, str(peer.get("inbound_token") or "")):
+            raise PermissionError("unauthorized unpair request")
+        self.state.consume_nonce(str(payload.get("nonce") or ""), float(payload.get("expires_at") or 0))
+        return payload, peer
+
+    def accept_unpair_prepare(self, request: dict[str, Any], bearer_token: str) -> dict[str, Any]:
+        payload, _ = self._verify_unpair_request(request, bearer_token)
+        if payload.get("phase") != "prepare":
+            raise ValueError("invalid unpair phase")
+        transaction = self.state.prepare_unpair(
+            payload["peer_id"], payload["fingerprint"], payload["transaction_id"], payload["peer_id"]
+        )
+        response = {
+            "status": "prepared",
+            "transaction_id": transaction["transaction_id"],
+            "peer_id": self.identity.peer_id,
+            "fingerprint": self.identity.fingerprint,
+        }
+        response["signature"] = self.identities.sign(response)
+        return response
+
+    def accept_unpair_commit(self, request: dict[str, Any], bearer_token: str) -> dict[str, Any]:
+        payload, previous = self._verify_unpair_request(request, bearer_token, allow_committed=True)
+        if payload.get("phase") != "commit":
+            raise ValueError("invalid unpair phase")
+        if previous.get("status") == "committed":
+            transaction = previous
+        else:
+            transaction = self.state.commit_unpair(
+                payload["transaction_id"], payload["peer_id"], payload["fingerprint"], scope="both"
+            )
+            if self._artifact_cleanup:
+                transaction["artifact_cleanup"] = self._artifact_cleanup(
+                    payload["peer_id"], payload["fingerprint"], False
+                )
+        response = {
+            "status": "committed",
+            "transaction_id": transaction["transaction_id"],
+            "peer_id": self.identity.peer_id,
+            "fingerprint": self.identity.fingerprint,
+        }
+        response["signature"] = self.identities.sign(response)
+        return response
+
+    def _unpair_request(self, peer: dict[str, Any], transaction_id: str, phase: str) -> dict[str, Any]:
+        request = {
+            "protocol_version": NETWORK_PROTOCOL_VERSION,
+            "phase": phase,
+            "transaction_id": transaction_id,
+            "nonce": secrets.token_urlsafe(24),
+            "expires_at": _now() + PAIR_REQUEST_TTL_SECONDS,
+            "peer_id": self.identity.peer_id,
+            "fingerprint": self.identity.fingerprint,
+            "cert_pem": self.identity.cert_pem,
+            "target_peer_id": peer["peer_id"],
+            "target_fingerprint": peer["fingerprint"],
+        }
+        request["signature"] = self.identities.sign(request)
+        return request
+
+    def unpair(self, peer_id: str, expected_fingerprint: str, dry_run: bool = False) -> dict[str, Any]:
+        peer = self.state.peer(peer_id)
+        if not peer:
+            raise ValueError(f"paired peer not found: {peer_id}")
+        fingerprint = str(expected_fingerprint or "").lower()
+        if peer.get("fingerprint") != fingerprint:
+            raise ValueError("expected fingerprint does not match the paired identity")
+        preview = self.state.preview_unpair(peer_id, fingerprint)
+        if self._artifact_cleanup:
+            preview["local_artifacts"] = self._artifact_cleanup(peer_id, fingerprint, True)
+        if dry_run:
+            return {"status": "preview", "scope": "both", **preview}
+
+        pending = self.state.pending_unpair(peer_id)
+        transaction_id = str(pending.get("transaction_id")) if pending else secrets.token_urlsafe(24)
+        if not pending:
+            self.state.prepare_unpair(peer_id, fingerprint, transaction_id, self.identity.peer_id)
+        base = str(peer["url"]).rsplit("/mcp", 1)[0]
+        context = _pinned_ssl_context(peer["cert_pem"])
+        headers = {"Authorization": f"Bearer {peer['outbound_token']}"}
+        with httpx.Client(verify=context, headers=headers, timeout=15.0, trust_env=False) as client:
+            if not pending:
+                prepared = client.post(
+                    f"{base}/bridge/v1/unpair/prepare",
+                    json=self._unpair_request(peer, transaction_id, "prepare"),
+                )
+                prepared.raise_for_status()
+                prepared_body = prepared.json()
+                prepared_signature = prepared_body.pop("signature", "")
+                _verify_signature(peer["cert_pem"], prepared_body, prepared_signature)
+                if prepared_body.get("status") != "prepared" or prepared_body.get("transaction_id") != transaction_id:
+                    raise ValueError("remote unpair prepare response did not match the transaction")
+            committed = client.post(
+                f"{base}/bridge/v1/unpair/commit",
+                json=self._unpair_request(peer, transaction_id, "commit"),
+            )
+            committed.raise_for_status()
+            committed_body = committed.json()
+        committed_signature = committed_body.pop("signature", "")
+        _verify_signature(peer["cert_pem"], committed_body, committed_signature)
+        if committed_body.get("status") != "committed" or committed_body.get("transaction_id") != transaction_id:
+            raise ValueError("remote unpair commit response did not match the transaction")
+        transaction = self.state.commit_unpair(transaction_id, peer_id, fingerprint, scope="both")
+        if self._artifact_cleanup:
+            transaction["artifact_cleanup"] = self._artifact_cleanup(peer_id, fingerprint, False)
+        return transaction
+
+    def forget_local(self, peer_id: str, expected_fingerprint: str, dry_run: bool = False) -> dict[str, Any]:
+        peer = self.state.peer(peer_id)
+        if not peer:
+            raise ValueError(f"paired peer not found: {peer_id}")
+        fingerprint = str(expected_fingerprint or "").lower()
+        if peer.get("fingerprint") != fingerprint:
+            raise ValueError("expected fingerprint does not match the paired identity")
+        preview = self.state.preview_unpair(peer_id, fingerprint)
+        if self._artifact_cleanup:
+            preview["local_artifacts"] = self._artifact_cleanup(peer_id, fingerprint, True)
+        if dry_run:
+            return {"status": "preview", "scope": "local", "remote_cleanup_required": True, **preview}
+        transaction_id = secrets.token_urlsafe(24)
+        self.state.prepare_unpair(peer_id, fingerprint, transaction_id, self.identity.peer_id)
+        transaction = self.state.commit_unpair(transaction_id, peer_id, fingerprint, scope="local")
+        if self._artifact_cleanup:
+            transaction["artifact_cleanup"] = self._artifact_cleanup(peer_id, fingerprint, False)
+        transaction["remote_cleanup_required"] = True
+        return transaction
 
     def pair_action(self, action: str, peer_id: str, expected_fingerprint: Optional[str] = None) -> dict[str, Any]:
         action = str(action or "").strip().lower()
@@ -988,6 +1307,24 @@ class NetworkASGI:
                 payload = json.loads(body.decode("utf-8"))
                 result = self.manager.accept_pair_offer(payload) if path.endswith("/pair") else self.manager.accept_rekey(payload)
                 await self._json(send, 200, result)
+            except Exception as exc:
+                await self._json(send, 400, {"error": str(exc), "error_type": type(exc).__name__})
+            return
+        if path in {"/bridge/v1/unpair/prepare", "/bridge/v1/unpair/commit"} and scope.get("method") == "POST":
+            try:
+                self._check_rate(scope)
+                headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+                token = headers.get("authorization", "").removeprefix("Bearer ")
+                body = await self._read_body(receive)
+                payload = json.loads(body.decode("utf-8"))
+                result = (
+                    self.manager.accept_unpair_prepare(payload, token)
+                    if path.endswith("/prepare")
+                    else self.manager.accept_unpair_commit(payload, token)
+                )
+                await self._json(send, 200, result)
+            except PermissionError as exc:
+                await self._json(send, 401, {"error": str(exc), "error_type": type(exc).__name__})
             except Exception as exc:
                 await self._json(send, 400, {"error": str(exc), "error_type": type(exc).__name__})
             return
@@ -1438,7 +1775,7 @@ class MdnsDiscovery:
             server=f"{identity.peer_id}.local.",
         )
         self.zeroconf = Zeroconf()
-        self.zeroconf.register_service(self.info)
+        self.zeroconf.register_service(self.info, allow_name_change=True)
 
         manager = self.manager
 

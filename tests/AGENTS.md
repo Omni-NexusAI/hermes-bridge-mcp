@@ -17,6 +17,7 @@ Automated verification for the bridge's compatibility, security, discovery, pair
 
 - Assert the 11 stable core tool names and schemas separately from optional extension tools.
 - Cover approval, rejection, replay, expiry, certificate mismatch, revocation, restart, endpoint change, and identity-preserving rekey.
+- Cover coordinated unpair, dry-run, forced local forget, fingerprint mismatch, retry/idempotency, and cleanup of stale pairing artifacts.
 - Exercise signed introductions and confirm introduced unknown identities remain candidates until approval.
 - Cover tagged Tailscale filtering, official IPv4/IPv6 ranges, malformed status/API output, unavailable CLI, unavailable/unauthorized API, unreachable peers, and sanitized discovery health.
 

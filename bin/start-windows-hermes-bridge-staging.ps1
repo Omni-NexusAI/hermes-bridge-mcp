@@ -1,83 +1,17 @@
 $ErrorActionPreference = "Stop"
-
-$HermesHome = "$env:LOCALAPPDATA\hermes"
-$BridgeCmd = Join-Path $HermesHome "bin\windows-hermes-mcp-serve.cmd"
+$env:HERMES_BRIDGE_AUTH_TOKEN = if ($env:HERMES_BRIDGE_STAGING_TOKEN) { $env:HERMES_BRIDGE_STAGING_TOKEN } else { "staging-local-only" }
+$HermesHome = Join-Path $env:LOCALAPPDATA "hermes"
+$RuntimeRoot = Join-Path $HermesHome "bridge-runtime"
+$Marker = Join-Path $RuntimeRoot "current.json"
+$Release = if (Test-Path $Marker) { (Get-Content $Marker -Raw | ConvertFrom-Json).release } else { $HermesHome }
+$PythonExe = Join-Path $RuntimeRoot "venv\Scripts\python.exe"
+if (-not (Test-Path $PythonExe)) { $PythonExe = Join-Path $HermesHome "hermes-agent\venv\Scripts\python.exe" }
+$BridgeScript = Join-Path $Release "bin\windows-hermes-proxy-mcp.py"
+if (-not (Test-Path $BridgeScript)) { $BridgeScript = Join-Path $HermesHome "bin\windows-hermes-proxy-mcp.py" }
 $LogDir = Join-Path $HermesHome "logs"
-$LogPath = Join-Path $LogDir "windows-bridge-supergateway-staging.log"
-$ErrPath = Join-Path $LogDir "windows-bridge-supergateway-staging.err.log"
-$PidPath = Join-Path $HermesHome "windows-bridge-supergateway-staging.pid"
-$Port = 18083
-
-function Test-PortOpen {
-    param([int]$PortToCheck)
-    try {
-        $client = [System.Net.Sockets.TcpClient]::new()
-        $task = $client.ConnectAsync('127.0.0.1', $PortToCheck)
-        if (-not $task.Wait(2000)) { $client.Dispose(); return $false }
-        $client.Dispose()
-        return $true
-    } catch {
-        return $false
-    }
-}
-
-function Get-ListenerPid {
-    param([int]$PortToCheck)
-    $lines = cmd /c "netstat -ano | findstr :$PortToCheck" 2>$null
-    foreach ($line in $lines) {
-        if ($line -match "LISTENING\s+(\d+)\s*$") { return [int]$Matches[1] }
-    }
-    return $null
-}
-
-New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-
-if ((-not (Test-Path $PidPath)) -and (Test-PortOpen -PortToCheck $Port)) {
-    $existingPid = Get-ListenerPid -PortToCheck $Port
-    if ($existingPid) { $existingPid | Set-Content -Path $PidPath -NoNewline }
-    Write-Output "OK: existing staging bridge is already listening on port $Port"
-    return
-}
-
-if (Test-Path $PidPath) {
-    $oldPid = Get-Content $PidPath -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($oldPid) {
-        Stop-Process -Id ([int]$oldPid) -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item $PidPath -Force -ErrorAction SilentlyContinue
-}
-
-Start-Sleep -Seconds 1
-
-$supergateway = (Get-Command supergateway.cmd -ErrorAction SilentlyContinue).Source
-if (-not $supergateway) {
-    $supergateway = (Get-Command supergateway -ErrorAction Stop).Source
-}
-
-if (Test-Path $LogPath) { Remove-Item $LogPath -Force -ErrorAction SilentlyContinue }
-if (Test-Path $ErrPath) { Remove-Item $ErrPath -Force -ErrorAction SilentlyContinue }
-
-$arguments = @(
-    "--stdio", "`"$BridgeCmd`"",
-    "--port", "$Port",
-    "--baseUrl", "http://localhost:$Port",
-    "--outputTransport", "streamableHttp",
-    "--streamableHttpPath", "/mcp",
-    "--stateful",
-    "--sessionTimeout", "600000",
-    "--healthEndpoint", "/healthz",
-    "--logLevel", "info"
-)
-
-$process = Start-Process -FilePath $supergateway -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput $LogPath -RedirectStandardError $ErrPath -PassThru
-$process.Id | Set-Content -Path $PidPath -NoNewline
-
-Start-Sleep -Seconds 3
-
-if (Test-PortOpen -PortToCheck $Port) {
-    Write-Output "OK: staging supergateway PID=$($process.Id) listening on port $Port"
-} else {
-    Write-Output "WARN: staging supergateway PID=$($process.Id) started but port $Port is not reachable"
-    Write-Output "--- stderr (last 20 lines) ---"
-    Get-Content $ErrPath -Tail 20 -ErrorAction SilentlyContinue
-}
+New-Item -ItemType Directory -Force $LogDir | Out-Null
+$arguments = @($BridgeScript, "--transport", "streamable-http", "--host", "127.0.0.1", "--port", "18083", "--stateless-http", "--json-response")
+$process = Start-Process -FilePath $PythonExe -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput (Join-Path $LogDir "windows-bridge-staging.log") -RedirectStandardError (Join-Path $LogDir "windows-bridge-staging.err.log") -PassThru
+$process.Id | Set-Content (Join-Path $HermesHome "windows-bridge-staging.pid") -NoNewline
+Start-Sleep -Seconds 2
+try { Invoke-RestMethod "http://127.0.0.1:18083/readyz" -TimeoutSec 3 | Out-Null; Write-Output "OK: native staging bridge PID=$($process.Id) ready on port 18083" } catch { Write-Output "WARN: staging bridge did not become ready" }

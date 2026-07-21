@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import urllib.error
 import urllib.request
@@ -39,7 +40,7 @@ def parse_mcp_servers(settings: dict) -> dict:
     return parsed
 
 
-def configure(settings: dict, name: str, url: str) -> tuple[dict, bool]:
+def configure(settings: dict, name: str, url: str, bearer_token: str = "") -> tuple[dict, bool]:
     parsed = parse_mcp_servers(settings)
     servers = parsed["mcpServers"]
     desired = {
@@ -56,6 +57,8 @@ def configure(settings: dict, name: str, url: str) -> tuple[dict, bool]:
         "tool_timeout": DEFAULT_TOOL_TIMEOUT,
         "timeout": DEFAULT_TOOL_TIMEOUT,
     }
+    if bearer_token:
+        desired["headers"] = {"Authorization": f"Bearer {bearer_token}"}
     changed = servers.get(name) != desired
     servers[name] = desired
     settings["mcp_servers"] = json.dumps(parsed, indent=2, ensure_ascii=False)
@@ -68,7 +71,7 @@ def check_health(url: str, timeout: float = 5.0) -> dict:
             body = response.read().decode("utf-8", errors="replace").strip()
             return {
                 "url": url,
-                "ok": response.status == 200 and body == "ok",
+                "ok": response.status == 200 and (body == "ok" or json.loads(body).get("status") in {"ok", "ready"}),
                 "status": response.status,
                 "body": body,
             }
@@ -87,12 +90,15 @@ def main() -> int:
     parser.add_argument("--url", default=DEFAULT_URL, help="Hermes Bridge MCP URL")
     parser.add_argument("--health-url", default=DEFAULT_HEALTH_URL, help="Hermes Bridge health endpoint")
     parser.add_argument("--check-health", action="store_true", help="Check the bridge health endpoint after configuring")
+    parser.add_argument("--token-file", help="File containing the local bridge bearer token")
     parser.add_argument("--dry-run", action="store_true", help="Print the resulting settings without writing")
     args = parser.parse_args()
 
     settings_path = Path(args.settings)
     settings = load_settings(settings_path)
-    updated, changed = configure(settings, args.name, args.url)
+    token_path = Path(args.token_file) if args.token_file else Path(os.environ.get("LOCALAPPDATA", "")) / "hermes" / "bridge-state" / "local-mcp-token"
+    bearer_token = token_path.read_text(encoding="utf-8").strip() if token_path.is_file() else ""
+    updated, changed = configure(settings, args.name, args.url, bearer_token)
 
     parsed = json.loads(updated["mcp_servers"])
     servers = parsed.get("mcpServers", {})
@@ -102,7 +108,8 @@ def main() -> int:
         "url": args.url,
         "changed": changed,
         "server_count": len(servers),
-        "entry": servers.get(args.name),
+        "entry": {key: value for key, value in servers.get(args.name, {}).items() if key != "headers"},
+        "bearer_token_configured": bool(bearer_token),
         "restart_a0_required": True,
     }
     if args.check_health:

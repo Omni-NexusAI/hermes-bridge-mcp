@@ -85,7 +85,14 @@ def install(source: Path, start: bool, dependencies: bool) -> dict:
     (root / "current.json").write_text(json.dumps({"release": str(release), "previous": str(prior) if prior else None}, indent=2), encoding="utf-8")
     result = {"status": "installed", "release": str(release), "bridge_root": str(root), "state_preserved": str(hermes_home() / "bridge-state")}
     if start:
-        result["start"] = "Run the platform launcher from the installed release; automatic startup requires --enable-startup."
+        if os.name == "nt":
+            launcher = release / "bin" / "start-windows-hermes-bridge.ps1"
+            peer_launcher = release / "bin" / "start-windows-hermes-peer-bridge.ps1"
+            subprocess.check_call(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher)])
+            subprocess.check_call(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(peer_launcher)])
+            result["start"] = "native local and secure peer listeners started"
+        else:
+            result["start"] = "Install complete; run bin/start-hermes-bridge-peer.sh for the peer listener."
     return result
 
 

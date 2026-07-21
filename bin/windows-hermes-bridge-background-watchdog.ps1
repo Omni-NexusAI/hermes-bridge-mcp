@@ -1,39 +1,31 @@
-$HermesHome = "$env:LOCALAPPDATA\hermes"
-$PidPath = Join-Path $HermesHome "windows-bridge-supergateway.pid"
-$Port = 18082
-$StartScript = Join-Path $HermesHome "bin\start-windows-hermes-bridge.ps1"
+$HermesHome = Join-Path $env:LOCALAPPDATA "hermes"
+$LocalStart = Join-Path $HermesHome "bin\start-windows-hermes-bridge.ps1"
+$PeerStart = Join-Path $HermesHome "bin\start-windows-hermes-peer-bridge.ps1"
 $LogDir = Join-Path $HermesHome "logs"
 $LogPath = Join-Path $LogDir "bridge-background-watchdog.log"
-
-function Test-PortOpen {
-    param([int]$PortToCheck)
-    try {
-        $client = [System.Net.Sockets.TcpClient]::new()
-        $task = $client.ConnectAsync('127.0.0.1', $PortToCheck)
-        if (-not $task.Wait(2000)) { $client.Dispose(); return $false }
-        $client.Dispose()
-        return $true
-    } catch {
-        return $false
-    }
-}
-
-function Is-BridgeAlive {
-    if (-not (Test-PortOpen -PortToCheck $Port)) { return $false }
-    if (-not (Test-Path $PidPath)) { return $true }
-    $pidValue = Get-Content $PidPath -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $pidValue) { return $true }
-    return [bool](Get-Process -Id ([int]$pidValue) -ErrorAction SilentlyContinue)
-}
-
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+function Test-Ready([string]$Url) {
+    try { $response = Invoke-RestMethod $Url -TimeoutSec 3; return $response.status -in @("ready", "ok") } catch { return $false }
+}
+
+function Test-Listener([int]$Port) {
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $connected = $client.ConnectAsync("127.0.0.1", $Port).Wait(2000)
+        $client.Dispose()
+        return $connected
+    } catch { return $false }
+}
+
 while ($true) {
-    if (-not (Is-BridgeAlive)) {
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-        Add-Content -Path $LogPath -Value "[$timestamp] Bridge down, restarting..."
-        & $StartScript | Out-Null
+    if (-not (Test-Ready "http://127.0.0.1:18082/readyz")) {
+        Add-Content $LogPath "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Local bridge unhealthy; restarting"
+        & $LocalStart | Out-Null
+    }
+    if ($env:HERMES_BRIDGE_AUTO_DISCOVERY -ne "0" -and -not (Test-Listener 18443)) {
+        Add-Content $LogPath "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Secure peer bridge unhealthy; restarting"
+        & $PeerStart | Out-Null
     }
     Start-Sleep -Seconds 60
 }
-

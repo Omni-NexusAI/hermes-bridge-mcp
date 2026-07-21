@@ -13,10 +13,10 @@ $HermesPython = Join-Path $HermesHome "hermes-agent\venv\Scripts\python.exe"
 New-Item -ItemType Directory -Force -Path $HermesBin | Out-Null
 
 if (Test-Path -LiteralPath $HermesPython) {
-    Write-Host "Installing Hermes Bridge network dependencies..."
-    & $HermesPython -m pip install -r (Join-Path $RepoRoot "requirements-network.txt")
+    Write-Host "Installing the versioned native bridge runtime and pinned dependencies..."
+    & $HermesPython (Join-Path $RepoRoot "bootstrap.py") install --source $RepoRoot | Out-Host
 } else {
-    Write-Warning "Hermes Python was not found at $HermesPython; install requirements-network.txt before enabling automatic discovery."
+    Write-Warning "Hermes Python was not found at $HermesPython; run bootstrap.py install to create the bridge runtime."
 }
 
 $binFiles = @(
@@ -49,12 +49,9 @@ $bridge = Join-Path $HermesBin "start-windows-hermes-bridge.ps1"
 Write-Host "Installed Hermes Bridge MCP scripts to: $HermesBin"
 Write-Host "Installed hidden Startup launchers to: $StartupDir"
 
-if (Get-Command supergateway.cmd -ErrorAction SilentlyContinue) {
-    Write-Host "Starting Hermes Bridge MCP..."
-    powershell -NoProfile -ExecutionPolicy Bypass -File $bridge | Out-Host
-} else {
-    Write-Warning "supergateway.cmd was not found. Install it with: npm install -g supergateway"
-}
+Write-Host "Starting native Hermes Bridge MCP and secure peer listener..."
+powershell -NoProfile -ExecutionPolicy Bypass -File $bridge | Out-Host
+powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $HermesBin "start-windows-hermes-peer-bridge.ps1") | Out-Host
 
 if ($A0SettingsPath) {
     $helper = Join-Path $RepoRoot "scripts\configure-a0-mcp.py"
@@ -77,7 +74,7 @@ Write-Host "  hermes-bridge-staging -> http://host.docker.internal:18083/mcp"
 Write-Host "  hermes-bridge legacy peer HTTP -> http://<LAN-IP>:18084/mcp"
 Write-Host "  hermes-bridge automatic peer HTTPS -> https://<LAN-IP>:18443/mcp"
 Write-Host "  legacy names windows-hermes and windows-hermes-staging still point to the same bridge if already configured"
-Write-Host "  expected bridge_version: v1.3.0"
+Write-Host "  expected bridge_version: v1.3.1"
 Write-Host ""
 Write-Host "Verify from Docker Hermes:"
 Write-Host "  hermes mcp test hermes-bridge"
