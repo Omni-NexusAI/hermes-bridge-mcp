@@ -71,6 +71,13 @@ def test_messaging_gateway_artifacts_are_not_shipped():
     assert [path for path in forbidden if path.exists()] == []
 
 
+def test_local_windows_launcher_forces_http_even_when_discovery_is_enabled():
+    launcher = Path(__file__).resolve().parents[1] / "bin" / "start-windows-hermes-bridge.ps1"
+    source = launcher.read_text(encoding="utf-8")
+    assert '$env:HERMES_BRIDGE_SECURE_NETWORK = "0"' in source
+    assert '"--stateless-http"' in source
+
+
 def test_extract_session_id_from_quiet_stderr():
     module = load_proxy_module()
 
