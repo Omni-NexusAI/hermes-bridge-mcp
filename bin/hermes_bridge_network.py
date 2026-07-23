@@ -1028,6 +1028,12 @@ class NetworkManager:
         responder_identity = self.inspect_identity(responder_url)
         if responder_identity.get("fingerprint") != peer.get("fingerprint"):
             raise ValueError("remote rekey response advertised an endpoint for another identity")
+        requested_url = _validate_remote_peer_url(endpoint)
+        if urlparse(requested_url).scheme == "https":
+            requested_identity = self.inspect_identity(requested_url)
+            if requested_identity.get("fingerprint") != peer.get("fingerprint"):
+                raise ValueError("requested HTTPS rekey endpoint changed identity")
+            responder_url = requested_url
         updated = dict(peer)
         updated.update({
             "url": responder_url,

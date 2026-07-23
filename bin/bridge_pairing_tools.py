@@ -152,6 +152,12 @@ def add_pairing_tools(mcp, network_manager=None) -> None:
                 network_manager.state.ingest_candidate(candidate)
                 if not expected_fingerprint:
                     return _json({"status": "confirmation_required", **candidate, "next_step": "Verify the remote fingerprint, then repeat with expected_fingerprint."})
+                existing = network_manager.state.peer(peer_id)
+                if existing and existing.get("fingerprint") == expected_fingerprint:
+                    # A previously approved identity may not remain in the
+                    # untrusted candidate list.  Refresh its verified endpoint
+                    # through the signed rekey path without requiring approval.
+                    return _json(network_manager.rekey_peer(existing, url))
                 return _json(network_manager.approve(peer_id, expected_fingerprint))
             except Exception as exc:
                 return _json({"error": type(exc).__name__, "message": str(exc), "peer_id": peer_id, "url": url})
