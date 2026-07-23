@@ -5,6 +5,9 @@
 - `AGENTS.md` files are binding work contracts for their subtrees.
 - Read the full applicable chain before editing and update it after meaningful contract or structure changes.
 - Preserve the stable v1.2.7 `bridge_agent_*` and `bridge_peer_*` core tool contract unless a breaking version is explicitly declared.
+- Pairing MCP Prompts are optional discovery conveniences; pairing tools remain
+  authoritative and compatibility commands remain available for clients that
+  do not expose MCP Prompts.
 
 ## Isolation Contract
 

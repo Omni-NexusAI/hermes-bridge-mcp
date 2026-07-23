@@ -19,8 +19,11 @@ modes cover every scenario: manual (known IP), discovery (mDNS auto-find),
 and Tailscale (cross-subnet). Eliminates the repetitive back-and-forth of
 token generation, peers.json editing, and bidirectional verification.
 
-**Design goal:** the user types one prompt (often exposed as a slash command by their agent), the agent handles the rest —
-token generation, config writes on both sides, and connectivity verification. These workflows are built directly into the MCP Server via MCP Prompts and are compatible universally with any MCP client.
+**Design goal:** the user invokes one prompt and the agent handles discovery,
+fingerprint verification, pairing, and connectivity checks. Clients that expose
+MCP Prompts receive these workflows directly from the server. The compatibility
+registration script remains available for clients that expose MCP tools but not
+MCP Prompts.
 
 ## When to Use
 
