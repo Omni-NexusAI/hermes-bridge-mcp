@@ -22,7 +22,7 @@ Runtime code and launchers for local delegation, peer networking, discovery, pai
 - Separate static `peers.json` compatibility data from managed pairing state.
 - Bind credentials to persistent identity fingerprints and verify pinned certificates before MCP calls.
 - Keep discovery metadata non-secret and strictly validate all untrusted network input.
-- Start production mDNS and secure HTTPS unless `HERMES_BRIDGE_AUTO_DISCOVERY=0`; keep legacy static peers authoritative on ID collisions and keep their listener independent from secure discovery failures.
+- Start production mDNS and secure HTTPS unless `HERMES_BRIDGE_AUTO_DISCOVERY=0`; keep legacy static peers authoritative until an explicitly approved managed pairing migrates the same ID, and keep their listener independent from secure discovery failures.
 - Keep Tailscale CLI execution and API responses injectable, report only sanitized health, and never expose tailnet names, node names, IPs, tags, API tokens, or raw Tailscale output through MCP.
 - Tailscale API inventory may refresh candidate endpoints for pinned peers, but automatic tailnet enrollment, auth-key creation, and device authorization are outside this runtime contract.
 

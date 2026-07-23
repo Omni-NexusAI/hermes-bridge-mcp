@@ -864,6 +864,18 @@ class NetworkManager:
         responder_identity = self.inspect_identity(responder_url)
         if responder_identity.get("fingerprint") != remote["fingerprint"]:
             raise ValueError("remote pairing response advertised an endpoint for another identity")
+        # An explicitly inspected HTTPS candidate is already proven to be the
+        # intended pinned identity.  Prefer it over a responder's legacy URL:
+        # older peers can still advertise :18084 in their response after their
+        # secure listener has moved to :18443.  Retaining that stale value
+        # silently downgrades a successful managed pairing on the next call.
+        candidate_url = _validate_remote_peer_url(candidate["url"])
+        if urlparse(candidate_url).scheme == "https":
+            candidate_identity = self.inspect_identity(candidate_url)
+            if candidate_identity.get("fingerprint") != remote["fingerprint"]:
+                raise ValueError("approved HTTPS candidate changed identity during pairing")
+            responder_url = candidate_url
+            responder_identity = candidate_identity
         final_receipt = dict(receipt)
         final_receipt["left_signature"] = offer["receipt_signature"]
         final_receipt["right_signature"] = accepted["receipt_signature"]
