@@ -1,85 +1,57 @@
 $ErrorActionPreference = "Stop"
 
-$HermesExe = "$env:LOCALAPPDATA\hermes\hermes-agent\venv\Scripts\hermes.exe"
-$HermesHome = "$env:LOCALAPPDATA\hermes"
-$BridgeCmd = Join-Path $HermesHome "bin\windows-hermes-mcp-serve.cmd"
+$HermesHome = Join-Path $env:LOCALAPPDATA "hermes"
+$RuntimeRoot = Join-Path $HermesHome "bridge-runtime"
+$Release = $null
+$Marker = Join-Path $RuntimeRoot "current.json"
+if (Test-Path $Marker) { $Release = (Get-Content $Marker -Raw | ConvertFrom-Json).release }
+if (-not $Release -or -not (Test-Path $Release)) { $Release = $HermesHome }
+$PythonExe = Join-Path $RuntimeRoot "venv\Scripts\python.exe"
+if (-not (Test-Path $PythonExe)) { $PythonExe = Join-Path $HermesHome "hermes-agent\venv\Scripts\python.exe" }
+$BridgeScript = Join-Path $Release "bin\windows-hermes-proxy-mcp.py"
+if (-not (Test-Path $BridgeScript)) { $BridgeScript = Join-Path $HermesHome "bin\windows-hermes-proxy-mcp.py" }
+$StateDir = Join-Path $HermesHome "bridge-state"
+$TokenPath = Join-Path $StateDir "local-mcp-token"
 $LogDir = Join-Path $HermesHome "logs"
-$LogPath = Join-Path $LogDir "windows-bridge-supergateway.log"
-$ErrPath = Join-Path $LogDir "windows-bridge-supergateway.err.log"
-$PidPath = Join-Path $HermesHome "windows-bridge-supergateway.pid"
+$LogPath = Join-Path $LogDir "windows-bridge.log"
+$ErrPath = Join-Path $LogDir "windows-bridge.err.log"
+$PidPath = Join-Path $HermesHome "windows-bridge.pid"
 $Port = 18082
 
-function Test-PortOpen {
-    param([int]$PortToCheck)
-    try {
-        $client = [System.Net.Sockets.TcpClient]::new()
-        $task = $client.ConnectAsync('127.0.0.1', $PortToCheck)
-        if (-not $task.Wait(2000)) { $client.Dispose(); return $false }
-        $client.Dispose()
-        return $true
-    } catch {
-        return $false
-    }
+New-Item -ItemType Directory -Force -Path $LogDir, $StateDir | Out-Null
+if (-not (Test-Path $TokenPath)) {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($bytes)
+    $rng.Dispose()
+    [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_') | Set-Content $TokenPath -NoNewline
 }
-
-function Get-ListenerPid {
-    param([int]$PortToCheck)
-    $lines = cmd /c "netstat -ano | findstr :$PortToCheck" 2>$null
-    foreach ($line in $lines) {
-        if ($line -match "LISTENING\s+(\d+)\s*$") { return [int]$Matches[1] }
-    }
-    return $null
-}
-
-New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-
-if ((-not (Test-Path $PidPath)) -and (Test-PortOpen -PortToCheck $Port)) {
-    $existingPid = Get-ListenerPid -PortToCheck $Port
-    if ($existingPid) { $existingPid | Set-Content -Path $PidPath -NoNewline }
-    Write-Output "OK: existing bridge is already listening on port $Port"
-    return
-}
+$env:HERMES_BRIDGE_AUTH_TOKEN = (Get-Content $TokenPath -Raw).Trim()
+# This is the local A0/Codex endpoint. Discovery may be enabled globally, but
+# only the dedicated peer listener on 18443 is TLS-enabled.
+$env:HERMES_BRIDGE_SECURE_NETWORK = "0"
 
 if (Test-Path $PidPath) {
     $oldPid = Get-Content $PidPath -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($oldPid) {
+    if ($oldPid -and (Get-Process -Id ([int]$oldPid) -ErrorAction SilentlyContinue)) {
+        try {
+            $ready = Invoke-RestMethod "http://127.0.0.1:$Port/readyz" -TimeoutSec 2
+            if ($ready.status -eq "ready") { Write-Output "OK: native bridge already ready as PID $oldPid"; return }
+        } catch {}
         Stop-Process -Id ([int]$oldPid) -Force -ErrorAction SilentlyContinue
     }
     Remove-Item $PidPath -Force -ErrorAction SilentlyContinue
 }
 
-Start-Sleep -Seconds 1
-
-$supergateway = (Get-Command supergateway.cmd -ErrorAction SilentlyContinue).Source
-if (-not $supergateway) {
-    $supergateway = (Get-Command supergateway -ErrorAction Stop).Source
+$arguments = @($BridgeScript, "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "$Port", "--stateless-http", "--json-response")
+$process = Start-Process -FilePath $PythonExe -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput $LogPath -RedirectStandardError $ErrPath -PassThru
+$process.Id | Set-Content $PidPath -NoNewline
+Start-Sleep -Seconds 2
+try {
+    $ready = Invoke-RestMethod "http://127.0.0.1:$Port/readyz" -TimeoutSec 3
+    if ($ready.status -ne "ready") { throw "unexpected readiness response" }
+    Write-Output "OK: native bridge PID=$($process.Id) ready on port $Port"
+} catch {
+    Write-Output "WARN: native bridge PID=$($process.Id) did not become ready"
+    Get-Content $ErrPath -Tail 40 -ErrorAction SilentlyContinue
 }
-
-if (Test-Path $LogPath) { Remove-Item $LogPath -Force -ErrorAction SilentlyContinue }
-if (Test-Path $ErrPath) { Remove-Item $ErrPath -Force -ErrorAction SilentlyContinue }
-
-$arguments = @(
-    "--stdio", "`"$BridgeCmd`"",
-    "--port", "$Port",
-    "--baseUrl", "http://localhost:$Port",
-    "--outputTransport", "streamableHttp",
-    "--streamableHttpPath", "/mcp",
-    "--stateful",
-    "--sessionTimeout", "600000",
-    "--healthEndpoint", "/healthz",
-    "--logLevel", "info"
-)
-
-$process = Start-Process -FilePath $supergateway -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput $LogPath -RedirectStandardError $ErrPath -PassThru
-$process.Id | Set-Content -Path $PidPath -NoNewline
-
-Start-Sleep -Seconds 3
-
-if (Test-PortOpen -PortToCheck $Port) {
-    Write-Output "OK: supergateway PID=$($process.Id) listening on port $Port"
-} else {
-    Write-Output "WARN: supergateway PID=$($process.Id) started but port $Port is not reachable"
-    Write-Output "--- stderr (last 20 lines) ---"
-    Get-Content $ErrPath -Tail 20 -ErrorAction SilentlyContinue
-}
-

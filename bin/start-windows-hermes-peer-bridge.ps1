@@ -1,13 +1,18 @@
 $ErrorActionPreference = "Stop"
 
 $HermesHome = "$env:LOCALAPPDATA\hermes"
-$PythonExe = "$HermesHome\hermes-agent\venv\Scripts\python.exe"
-$BridgeScript = Join-Path $HermesHome "bin\windows-hermes-proxy-mcp.py"
+$RuntimeRoot = Join-Path $HermesHome "bridge-runtime"
+$Marker = Join-Path $RuntimeRoot "current.json"
+$Release = if (Test-Path $Marker) { (Get-Content $Marker -Raw | ConvertFrom-Json).release } else { $HermesHome }
+$PythonExe = Join-Path $RuntimeRoot "venv\Scripts\python.exe"
+if (-not (Test-Path $PythonExe)) { $PythonExe = "$HermesHome\hermes-agent\venv\Scripts\python.exe" }
+$BridgeScript = Join-Path $Release "bin\windows-hermes-proxy-mcp.py"
+if (-not (Test-Path $BridgeScript)) { $BridgeScript = Join-Path $HermesHome "bin\windows-hermes-proxy-mcp.py" }
 $LogDir = Join-Path $HermesHome "logs"
 $HostAddress = if ($env:HERMES_BRIDGE_HOST) { $env:HERMES_BRIDGE_HOST } else { "0.0.0.0" }
 $LegacyPort = if ($env:HERMES_BRIDGE_PORT) { [int]$env:HERMES_BRIDGE_PORT } else { 18084 }
 $SecurePort = if ($env:HERMES_BRIDGE_SECURE_PORT) { [int]$env:HERMES_BRIDGE_SECURE_PORT } else { 18443 }
-$DiscoveryEnabled = $env:HERMES_BRIDGE_AUTO_DISCOVERY -eq "1"
+$DiscoveryEnabled = $env:HERMES_BRIDGE_AUTO_DISCOVERY -ne "0"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -31,7 +36,7 @@ function Start-BridgeProcess {
         Remove-Item $PidPath -Force -ErrorAction SilentlyContinue
     }
 
-    $arguments = @($BridgeScript, "--transport", "streamable-http", "--host", $HostAddress, "--port", "$Port")
+    $arguments = @($BridgeScript, "--transport", "streamable-http", "--host", $HostAddress, "--port", "$Port", "--stateless-http", "--json-response")
     if ($Secure) { $arguments += "--secure-network" }
     $process = Start-Process -FilePath $PythonExe -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput $LogPath -RedirectStandardError $ErrPath -PassThru
     $process.Id | Set-Content -Path $PidPath -NoNewline
@@ -53,4 +58,8 @@ if ($env:HERMES_BRIDGE_PAIR_KEY -or $env:HERMES_BRIDGE_AUTH_TOKEN) {
     Write-Output "INFO: legacy HTTP peer listener skipped because no shared pair key is configured"
 }
 
-Start-BridgeProcess -Name "windows-secure-peer-bridge" -Port $SecurePort -Secure
+if ($DiscoveryEnabled) {
+    Start-BridgeProcess -Name "windows-secure-peer-bridge" -Port $SecurePort -Secure
+} else {
+    Write-Output "INFO: secure discovery listener disabled by HERMES_BRIDGE_AUTO_DISCOVERY=0"
+}

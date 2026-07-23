@@ -1,6 +1,6 @@
 # Hermes Bridge MCP
 
-Current bridge version: `v1.3.0` (release candidate).
+Current bridge version: `v1.3.1` (release candidate).
 
 Bridge one Hermes agent to another Hermes agent through MCP.
 
@@ -30,6 +30,7 @@ bridge anymore; install Hermes messaging integrations separately if needed.
 - `bridge_peer_*` tools for authenticated Hermes-to-Hermes delegation
 - `bridge_network_status` for discovered, paired, revoked, and recovering peers
 - `bridge_peer_pair` for explicit approval, rejection, revocation, and reconnection
+- `bridge_peer_unpair` for fingerprint-checked, coordinated removal or forced local forget
 
 Legacy `windows_agent_*` aliases are hidden by default. Set
 `HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS=1` only for older bridge clients that
@@ -97,6 +98,13 @@ powershell -ExecutionPolicy Bypass -File $env:LOCALAPPDATA\hermes\bin\start-herm
 
 Call `bridge_network_status` to inspect candidates. After comparing the complete
 fingerprint shown by the tool, approve once from either agent:
+
+To remove a stale secure relationship from both machines, call
+`bridge_peer_unpair` with the peer ID and its pinned fingerprint. The operation
+uses prepare/commit phases and is safe to retry. Use `scope="local"` only when
+the remote machine is permanently unavailable; the result explicitly reports
+that remote cleanup is still required. `dry_run=true` previews every local
+record that would be removed.
 
 ```text
 bridge_peer_pair(action="approve", peer_id="candidate-id", expected_fingerprint="full-sha256-fingerprint")
@@ -174,15 +182,25 @@ introductions. Introduced unknown identities remain candidates until approved.
 
 - A local Hermes install available to the bridge runtime
 - Docker Hermes configured with access to `host.docker.internal`
-- Node.js with `supergateway` installed globally:
-
-```powershell
-npm install -g supergateway
-```
+- Python dependencies pinned in `requirements-bridge.txt`; Node.js and
+  `supergateway` are not required.
 
 ## Install
 
-From this repository on Windows:
+From this repository on any supported platform, install the complete bridge
+payload without altering existing pairing or agent configuration:
+
+```text
+python bootstrap.py install --start
+python bootstrap.py doctor --json
+```
+
+The bootstrap keeps releases under the local Hermes home, preserves
+`bridge-state` and `peers.json`, and supports `rollback`. It installs bridge
+dependencies in its own virtual environment but intentionally does not install
+or update Hermes itself. Use `--no-deps` for an offline staging pass.
+
+From this repository on Windows, the legacy convenience wrapper remains:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -215,12 +233,17 @@ In Docker Hermes `config.yaml`:
 mcp_servers:
   hermes-bridge:
     url: http://host.docker.internal:18082/mcp
+    headers:
+      Authorization: Bearer <contents-of-%LOCALAPPDATA%\hermes\bridge-state\local-mcp-token>
     timeout: 120
     connect_timeout: 30
 ```
 
-Do not add `transport: sse` for this bridge. It uses supergateway
-Streamable HTTP at `/mcp`.
+Do not add `transport: sse` for this bridge. It uses native stateless
+Streamable HTTP with JSON responses at `/mcp`.
+The Windows launcher creates the local bearer token once and preserves it across
+upgrades. The A0 configuration helper reads that token automatically when run
+on Windows and never prints it in its result.
 
 ## Verify
 
@@ -255,11 +278,11 @@ bridge_peer_delegate_result
 bridge_peer_delegate_cancel
 ```
 
-v1.3.0 adds the optional `automatic_pairing_v1` extension tools
-`bridge_network_status` and `bridge_peer_pair`. The core list and extension list
+v1.3.x adds the optional `automatic_pairing_v1` extension tools
+`bridge_network_status`, `bridge_peer_pair`, and `bridge_peer_unpair`. The core list and extension list
 are reported separately in `public_tool_contract`.
 
-`bridge_agent_status` should report `bridge_version` as `v1.3.0` on every
+`bridge_agent_status` should report `bridge_version` as `v1.3.1` on every
 platform. It reports the local Hermes runtime separately as `hermes_version`.
 It also reports sanitized peer routing diagnostics without exposing token values.
 

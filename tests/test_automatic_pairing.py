@@ -73,6 +73,30 @@ def test_candidates_are_untrusted_redacted_and_conflicts_are_retained(tmp_path):
     assert "pinned to another identity" in conflict["conflict"]
 
 
+def test_forced_local_forget_is_fingerprint_bound_and_retry_visible(tmp_path):
+    manager = NetworkManager(tmp_path / "state")
+    remote = NetworkManager(tmp_path / "remote-state").identity
+    manager.state.save_peer({
+        "peer_id": "offline-peer",
+        "fingerprint": remote.fingerprint,
+        "cert_pem": remote.cert_pem,
+        "url": "https://127.0.0.1:24001/mcp",
+        "inbound_token": "i" * 32,
+        "outbound_token": "o" * 32,
+        "receipt": {"test": True},
+    })
+    with pytest.raises(ValueError, match="expected fingerprint"):
+        manager.forget_local("offline-peer", "f" * 64)
+    preview = manager.forget_local("offline-peer", remote.fingerprint, dry_run=True)
+    assert preview["remote_cleanup_required"] is True
+    assert manager.state.peer("offline-peer") is not None
+    forgotten = manager.forget_local("offline-peer", remote.fingerprint)
+    assert forgotten["status"] == "local_only"
+    assert forgotten["scope"] == "local"
+    assert forgotten["remote_cleanup_required"] is True
+    assert manager.state.peer("offline-peer") is None
+
+
 def test_replay_expiry_revocation_and_sandbox_guards(tmp_path, monkeypatch):
     state = PairingState(tmp_path / "state")
     nonce = "n" * 24
@@ -297,7 +321,25 @@ def test_two_sandboxed_https_peers_pair_delegate_recover_and_rekey(tmp_path):
         assert manager_b.state.peer("sandbox-a") is not None
 
         reverse = asyncio.run(_remote_tool(manager_b.state.peer("sandbox-a"), "bridge_agent_status", {}))
-        assert reverse["bridge_version"] == "v1.3.0"
+        assert reverse["bridge_version"] == "v1.3.1"
+
+        preview = manager_a.unpair("sandbox-b", identity_b.fingerprint, dry_run=True)
+        assert preview["status"] == "preview"
+        assert manager_a.state.peer("sandbox-b") is not None
+        # Simulate a lost commit response: B committed, while A still records
+        # the prepared transaction. Retrying must finish idempotently.
+        transaction_id = "r" * 24
+        peer_b = manager_a.state.peer("sandbox-b")
+        manager_a.state.prepare_unpair("sandbox-b", identity_b.fingerprint, transaction_id, "sandbox-a")
+        token = peer_b["outbound_token"]
+        manager_b.accept_unpair_prepare(manager_a._unpair_request(peer_b, transaction_id, "prepare"), token)
+        manager_b.accept_unpair_commit(manager_a._unpair_request(peer_b, transaction_id, "commit"), token)
+        unpaired = manager_a.unpair("sandbox-b", identity_b.fingerprint)
+        assert unpaired["status"] == "committed"
+        assert unpaired["scope"] == "both"
+        assert manager_a.state.peer("sandbox-b") is None
+        manager_b = NetworkManager(state_b, secure_port=new_port_b)
+        assert manager_b.state.peer("sandbox-a") is None
     finally:
         _stop_server(proc_a)
         if proc_b.poll() is None:

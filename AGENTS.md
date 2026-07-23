@@ -20,6 +20,7 @@
 - Treat Tailscale as a reachability layer, never as proof that a Hermes identity is trusted.
 - Never expose private keys, bearer credentials, or unredacted pairing records through tools or logs.
 - Use native `bridge_peer_*` tools as the normal remote-agent path; raw HTTP helpers remain diagnostics.
+- Keep portable installation state-preserving: bridge payloads may update atomically, but installers must not alter bridge-state, identities, pairings, legacy peers, agent configuration, or live services without explicit user authorization.
 
 ## Verification
 
