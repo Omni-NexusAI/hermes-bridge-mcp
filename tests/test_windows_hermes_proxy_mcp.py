@@ -55,6 +55,10 @@ def test_a0_config_helper_uses_universal_bridge_settings():
     assert "messenger gateway" in entry["description"]
     assert "windows-hermes" not in servers
 
+    updated, _ = module.configure({}, "hermes-bridge", module.DEFAULT_URL, "secret-token")
+    authenticated = json.loads(updated["mcp_servers"])["mcpServers"]["hermes-bridge"]
+    assert authenticated["headers"]["Authorization"] == "Bearer secret-token"
+
 
 def test_messaging_gateway_artifacts_are_not_shipped():
     root = Path(__file__).resolve().parents[1]
@@ -65,6 +69,13 @@ def test_messaging_gateway_artifacts_are_not_shipped():
     ]
 
     assert [path for path in forbidden if path.exists()] == []
+
+
+def test_local_windows_launcher_forces_http_even_when_discovery_is_enabled():
+    launcher = Path(__file__).resolve().parents[1] / "bin" / "start-windows-hermes-bridge.ps1"
+    source = launcher.read_text(encoding="utf-8")
+    assert '$env:HERMES_BRIDGE_SECURE_NETWORK = "0"' in source
+    assert '"--stateless-http"' in source
 
 
 def test_extract_session_id_from_quiet_stderr():
@@ -329,9 +340,9 @@ def test_bridge_agent_status_reports_bridge_version(monkeypatch):
 
     status = asyncio.run(call_status())
 
-    assert module.BRIDGE_VERSION == "v1.3.0"
+    assert module.BRIDGE_VERSION == "v1.3.1"
     assert module.MIN_COMPATIBLE_BRIDGE_VERSION == "v1.2.7"
-    assert status["bridge_version"] == "v1.3.0"
+    assert status["bridge_version"] == "v1.3.1"
     assert status["min_compatible_bridge_version"] == "v1.2.7"
     assert "Versions >= v1.2.7" in status["compatibility_policy"]
     assert status["hermes_version"] == "hermes-runtime"
@@ -381,6 +392,49 @@ def test_peer_config_loads_static_peers_and_token_env(tmp_path, monkeypatch):
     assert peers["quest3"]["url"] == "http://10.0.0.42:18084/mcp"
     assert peers["quest3"]["platform"] == "android"
     assert peers["quest3"]["token"] == "secret"
+
+
+def test_peer_config_accepts_utf8_bom(tmp_path):
+    module = load_proxy_module()
+    config = tmp_path / "peers.json"
+    config.write_text(
+        '{"peers": [{"peer_id": "desktop", "url": "http://192.168.0.2:18084/mcp", "pair_key": "test"}]}',
+        encoding="utf-8-sig",
+    )
+
+    peers = module._parse_peer_config(config)
+
+    assert peers["desktop"]["url"] == "http://192.168.0.2:18084/mcp"
+
+
+def test_managed_pair_overrides_colliding_legacy_peer(tmp_path, monkeypatch):
+    module = load_proxy_module()
+    config = tmp_path / "peers.json"
+    config.write_text(
+        '{"peers": [{"peer_id": "desktop", "url": "http://192.168.0.2:18084/mcp", "pair_key": "legacy"}]}',
+        encoding="utf-8",
+    )
+
+    class ManagedPeers:
+        def managed_peer_config(self):
+            return {
+                "desktop": {
+                    "peer_id": "desktop",
+                    "url": "https://192.168.0.2:18443/mcp",
+                    "managed": True,
+                }
+            }
+
+    monkeypatch.setattr(module, "_network_manager", lambda: ManagedPeers())
+
+    peers = module._load_peer_config(config)
+
+    assert peers["desktop"]["url"] == "http://192.168.0.2:18084/mcp"
+    # The no-path call is the runtime resolution path and merges managed state.
+    monkeypatch.setattr(module, "_peer_config_candidates", lambda path=None: [config])
+    peers = module._load_peer_config()
+    assert peers["desktop"]["url"] == "https://192.168.0.2:18443/mcp"
+    assert peers["desktop"]["managed"] is True
 
 
 def test_peer_config_prefers_pair_key_env(tmp_path, monkeypatch):

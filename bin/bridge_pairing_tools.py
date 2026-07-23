@@ -6,7 +6,7 @@ Cursor, etc.) can invoke these tools — no slash commands or skills
 required.
 
 Tools provided:
-  - bridge_manual_pair: Generate token, write peers.json, return paste block
+  - bridge_manual_pair: Pin a secure identity or configure an existing legacy key
   - bridge_pair_status: Comprehensive peer status with connectivity checks
   - bridge_repair_peer: Diagnose and fix broken peer connections
   - bridge_discovery_scan: List discovery candidates (v1.3.0+)
@@ -67,7 +67,7 @@ def _generate_token() -> str:
 
 def _read_peers(path: Path) -> dict:
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8-sig")
         data = json.loads(raw)
         if isinstance(data, dict) and "peers" in data:
             return data
@@ -97,7 +97,7 @@ def _discovery_available() -> bool:
     return network_path.exists()
 
 
-def add_pairing_tools(mcp) -> None:
+def add_pairing_tools(mcp, network_manager=None) -> None:
     """Register pairing management MCP tools on the server.
 
     Called by the main bridge server during startup. All tools are
@@ -109,12 +109,13 @@ def add_pairing_tools(mcp) -> None:
         peer_id: str,
         url: str,
         platform_name: Optional[str] = None,
+        expected_fingerprint: Optional[str] = None,
     ) -> str:
-        """Generate a shared pairing token and configure a peer in peers.json.
+        """Pair by pinned HTTPS identity or configure an existing legacy key.
 
-        Creates a cryptographically secure token, writes the peer entry
-        locally, and returns a copy-paste block for the remote device
-        to complete bidirectional pairing.
+        HTTPS inspects the remote identity and requires fingerprint confirmation.
+        Legacy HTTP uses an already configured HERMES_BRIDGE_PAIR_KEY; it never
+        invents a credential that the remote listener cannot accept.
 
         Args:
             peer_id: Unique name for the device (e.g. "laptop", "quest3")
@@ -131,10 +132,45 @@ def add_pairing_tools(mcp) -> None:
         peer_id = peer_id.strip()
         url = url.strip()
 
+        if urlparse(url).scheme == "https":
+            if network_manager is None:
+                return _json({"error": "secure_pairing_unavailable"})
+            try:
+                identity = network_manager.inspect_identity(url)
+                if identity.get("peer_id") != peer_id:
+                    return _json({"error": "peer_id_mismatch", "advertised_peer_id": identity.get("peer_id")})
+                candidate = {
+                    "peer_id": peer_id,
+                    "display_name": identity.get("display_name", peer_id),
+                    "fingerprint": identity["fingerprint"],
+                    "url": url,
+                    "platform": identity.get("platform", platform_name or "unknown"),
+                    "bridge_version": identity.get("bridge_version", "unknown"),
+                    "protocol_version": identity.get("protocol_version", "1"),
+                    "source": "manual",
+                }
+                network_manager.state.ingest_candidate(candidate)
+                if not expected_fingerprint:
+                    return _json({"status": "confirmation_required", **candidate, "next_step": "Verify the remote fingerprint, then repeat with expected_fingerprint."})
+                existing = network_manager.state.peer(peer_id)
+                if existing and existing.get("fingerprint") == expected_fingerprint:
+                    # A previously approved identity may not remain in the
+                    # untrusted candidate list.  Refresh its verified endpoint
+                    # through the signed rekey path without requiring approval.
+                    return _json(network_manager.rekey_peer(existing, url))
+                return _json(network_manager.approve(peer_id, expected_fingerprint))
+            except Exception as exc:
+                return _json({"error": type(exc).__name__, "message": str(exc), "peer_id": peer_id, "url": url})
+
         if not platform_name:
             platform_name = platform.system().lower() or "unknown"
 
-        token = _generate_token()
+        token = os.environ.get("HERMES_BRIDGE_PAIR_KEY", "").strip()
+        if not token:
+            return _json({
+                "error": "legacy_shared_key_required",
+                "message": "Set the same HERMES_BRIDGE_PAIR_KEY on both devices, or use HTTPS managed pairing. A local-only generated token cannot complete pairing.",
+            })
         config_path = _peer_config_file()
         data = _read_peers(config_path)
         peers = data.get("peers", [])
@@ -158,13 +194,7 @@ def add_pairing_tools(mcp) -> None:
         this_platform = platform.system().lower() or "unknown"
 
         # Try to match the port from the provided URL
-        this_port = "18084"
-        try:
-            parsed = urlparse(url)
-            if parsed.port:
-                this_port = str(parsed.port)
-        except Exception:
-            pass
+        this_port = os.environ.get("HERMES_BRIDGE_PORT", "18084")
 
         paste_block = (
             f"━━━ PASTE THIS INTO {peer_id}'s AGENT SESSION ━━━\n\n"
@@ -184,7 +214,7 @@ def add_pairing_tools(mcp) -> None:
             "peer_id": peer_id,
             "url": url,
             "platform": platform_name,
-            "token_generated": True,
+            "token_generated": False,
             "config_file": str(config_path),
             "paste_block_for_remote": paste_block,
             "next_step": (
@@ -226,6 +256,9 @@ def add_pairing_tools(mcp) -> None:
             "total_peers": len(peer_reports),
             "discovery_available": _discovery_available(),
         }
+
+        if network_manager is not None:
+            result["managed_network"] = network_manager.network_status()
 
         if _discovery_available():
             result["discovery_env"] = {

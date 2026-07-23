@@ -1,0 +1,5 @@
+mcp==1.26.0
+httpx==0.28.1
+uvicorn==0.41.0
+cryptography==46.0.7
+zeroconf==0.150.0

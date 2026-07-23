@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import hashlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -52,7 +53,7 @@ def _default_hermes_exe(home: Path, agent: Path) -> Path:
 HERMES_HOME = _default_hermes_home()
 HERMES_AGENT = _default_hermes_agent(HERMES_HOME)
 HERMES_EXE = _default_hermes_exe(HERMES_HOME, HERMES_AGENT)
-BRIDGE_VERSION = "v1.3.0"
+BRIDGE_VERSION = "v1.3.1"
 MIN_COMPATIBLE_BRIDGE_VERSION = "v1.2.7"
 DEFAULT_PUBLIC_TOOLS = (
     "bridge_agent_status",
@@ -70,6 +71,7 @@ DEFAULT_PUBLIC_TOOLS = (
 NETWORK_EXTENSION_TOOLS = (
     "bridge_network_status",
     "bridge_peer_pair",
+    "bridge_peer_unpair",
 )
 DEFAULT_CWD = Path.home()
 BRIDGE_STATE_DIR = Path(os.environ.get("HERMES_BRIDGE_STATE_DIR", str(HERMES_HOME / "bridge-state"))).expanduser()
@@ -149,6 +151,7 @@ def _network_manager() -> NetworkManager:
     if _NETWORK_MANAGER is None:
         secure_port = int(os.environ.get("HERMES_BRIDGE_SECURE_PORT", str(DEFAULT_SECURE_PORT)))
         _NETWORK_MANAGER = NetworkManager(BRIDGE_STATE_DIR, secure_port=secure_port)
+        _NETWORK_MANAGER.set_artifact_cleanup(_cleanup_peer_artifacts)
     return _NETWORK_MANAGER
 
 
@@ -203,6 +206,34 @@ class _BearerTokenMiddleware:
         })
 
 
+class _HealthASGI:
+    def __init__(self, app: Any, readiness_check=None):
+        self.app = app
+        self.readiness_check = readiness_check
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and scope.get("method") == "GET" and scope.get("path") in {"/healthz", "/readyz"}:
+            status = 200
+            body = b'{"status":"ok"}'
+            if scope.get("path") == "/readyz" and self.readiness_check:
+                try:
+                    ready = bool(self.readiness_check())
+                except Exception:
+                    ready = False
+                if not ready:
+                    status, body = 503, b'{"status":"not_ready"}'
+                else:
+                    body = b'{"status":"ready"}'
+            await send({
+                "type": "http.response.start",
+                "status": status,
+                "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode("ascii"))],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+        await self.app(scope, receive, send)
+
+
 class _BearerOnlyFastMCP(FastMCP):
     def __init__(self, *args: Any, bearer_tokens: Optional[list[str]] = None, token_provider=None, network_manager=None, **kwargs: Any):
         self._bridge_bearer_tokens = [token for token in (bearer_tokens or []) if token]
@@ -221,7 +252,7 @@ class _BearerOnlyFastMCP(FastMCP):
             )
         if self._bridge_network_manager:
             app = NetworkASGI(app, self._bridge_network_manager)
-        return app
+        return _HealthASGI(app, readiness_check=lambda: BRIDGE_STATE_DIR.parent.exists())
 
 
 def _json(data: dict) -> str:
@@ -730,7 +761,9 @@ def _peer_config_candidates(path: Optional[Path] = None, os_name: Optional[str] 
 
 def _parse_peer_config(config_path: Path) -> dict[str, dict[str, Any]]:
     try:
-        raw = config_path.read_text(encoding="utf-8")
+        # Windows PowerShell 5.1 commonly writes UTF-8 JSON with a BOM.
+        # Accept that interoperable form without weakening JSON validation.
+        raw = config_path.read_text(encoding="utf-8-sig")
         data = json.loads(raw)
     except Exception as exc:
         raise ValueError(f"failed to load peer config {config_path}: {exc}") from exc
@@ -789,8 +822,73 @@ def _load_peer_config(path: Optional[Path] = None) -> dict[str, dict[str, Any]]:
         managed_peers = _network_manager().managed_peer_config()
     except Exception:
         managed_peers = {}
-    # Explicit legacy/static configuration remains authoritative on collisions.
-    return {**managed_peers, **static_peers}
+    # Legacy/static peers remain available until a peer is explicitly migrated.
+    # A managed pairing for the same id is that explicit migration and must take
+    # precedence; otherwise an old :18084 record can silently override the
+    # verified HTTPS endpoint selected during pairing.
+    return {**static_peers, **managed_peers}
+
+
+def _cleanup_peer_artifacts(peer_id: str, fingerprint: str, dry_run: bool = False) -> dict[str, Any]:
+    """Remove non-managed references that could resurrect an unpaired peer.
+
+    Managed trust and credentials are removed by PairingState. This callback
+    owns the legacy peer file and peer-scoped Hermes session bindings.
+    Historical task results are intentionally retained for audit.
+    """
+    peer_id = str(peer_id or "").strip()
+    result: dict[str, Any] = {
+        "legacy_peer_entries": 0,
+        "session_bindings": 0,
+        "task_history_retained": True,
+    }
+    if PEER_CONFIG_FILE.exists():
+        try:
+            raw = json.loads(PEER_CONFIG_FILE.read_text(encoding="utf-8-sig"))
+            peers_raw = raw.get("peers", raw) if isinstance(raw, dict) else raw
+            if isinstance(peers_raw, list):
+                retained = [
+                    item for item in peers_raw
+                    if not (isinstance(item, dict) and str(item.get("peer_id") or item.get("id") or "").strip() == peer_id)
+                ]
+                result["legacy_peer_entries"] = len(peers_raw) - len(retained)
+                if not dry_run and result["legacy_peer_entries"]:
+                    updated = dict(raw) if isinstance(raw, dict) else retained
+                    if isinstance(updated, dict):
+                        updated["peers"] = retained
+                    PEER_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = PEER_CONFIG_FILE.with_suffix(PEER_CONFIG_FILE.suffix + ".tmp")
+                    tmp.write_text(json.dumps(updated, ensure_ascii=False, indent=2), encoding="utf-8")
+                    tmp.replace(PEER_CONFIG_FILE)
+            elif isinstance(peers_raw, dict) and peer_id in peers_raw:
+                result["legacy_peer_entries"] = 1
+                if not dry_run:
+                    updated = dict(raw)
+                    if "peers" in updated and isinstance(updated["peers"], dict):
+                        updated["peers"] = dict(updated["peers"])
+                        updated["peers"].pop(peer_id, None)
+                    else:
+                        updated.pop(peer_id, None)
+                    tmp = PEER_CONFIG_FILE.with_suffix(PEER_CONFIG_FILE.suffix + ".tmp")
+                    tmp.write_text(json.dumps(updated, ensure_ascii=False, indent=2), encoding="utf-8")
+                    tmp.replace(PEER_CONFIG_FILE)
+        except Exception as exc:
+            result["legacy_peer_cleanup_error"] = f"{type(exc).__name__}: {exc}"
+
+    with _STATE_LOCK:
+        data = _load_state()
+        sessions = data.setdefault("sessions", {})
+        matching_keys = [
+            key for key in sessions
+            if f"peer:{peer_id}:" in key or f":to:{peer_id}:" in key
+        ]
+        result["session_bindings"] = len(matching_keys)
+        if not dry_run and matching_keys:
+            for key in matching_keys:
+                sessions.pop(key, None)
+            _save_state(data)
+    result["fingerprint_verified"] = bool(fingerprint)
+    return result
 
 
 def _get_peer(peer_id: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
@@ -995,6 +1093,13 @@ def add_bridge_tools(mcp):
             network = {"extension": "automatic_pairing_v1", "error": f"{type(exc).__name__}: {exc}"}
         return _json({
             "bridge_version": BRIDGE_VERSION,
+            "build_revision": os.environ.get("HERMES_BRIDGE_BUILD_REVISION", "source"),
+            "mcp_transport": "native_stateless_streamable_http_json",
+            "network_state_schema": 2,
+            "runtime_dependencies": {
+                package: (importlib.metadata.version(package) if package else "")
+                for package in ("mcp", "httpx", "uvicorn", "cryptography", "zeroconf")
+            },
             "min_compatible_bridge_version": MIN_COMPATIBLE_BRIDGE_VERSION,
             "compatibility_policy": "Versions >= v1.2.7 preserve the default bridge_agent_* and bridge_peer_* tool contract unless a future breaking bridge version is explicitly declared.",
             "hermes_exe": str(HERMES_EXE),
@@ -1226,6 +1331,101 @@ def add_bridge_tools(mcp):
             })
 
     @mcp.tool()
+    def bridge_peer_unpair(
+        peer_id: str,
+        expected_fingerprint: Optional[str] = None,
+        expected_url: Optional[str] = None,
+        scope: str = "both",
+        cancel_active_tasks: bool = True,
+        dry_run: bool = False,
+    ) -> str:
+        """Cleanly remove a peer relationship.
+
+        scope="both" uses an authenticated, idempotent prepare/commit exchange
+        and removes trust on both bridges. scope="local" is an explicit forced
+        forget for an unreachable peer and reports that remote cleanup remains.
+        Managed peers require expected_fingerprint. Legacy peers require
+        expected_url and currently support local cleanup only.
+        """
+        try:
+            normalized_scope = str(scope or "").strip().lower()
+            if normalized_scope not in {"both", "local"}:
+                raise ValueError("scope must be both or local")
+            managed = _network_manager().state.peer(peer_id)
+            if managed:
+                if not expected_fingerprint:
+                    raise ValueError("expected_fingerprint is required for a managed peer")
+                result = (
+                    _network_manager().unpair(peer_id, expected_fingerprint, dry_run=dry_run)
+                    if normalized_scope == "both"
+                    else _network_manager().forget_local(peer_id, expected_fingerprint, dry_run=dry_run)
+                )
+            else:
+                static = _load_peer_config(PEER_CONFIG_FILE).get(peer_id)
+                if not static:
+                    raise ValueError(f"paired peer not found: {peer_id}")
+                if not expected_url or str(static.get("url")) != str(expected_url):
+                    raise ValueError("expected_url is required and must match the legacy peer endpoint")
+                if normalized_scope != "local":
+                    raise ValueError("legacy peers require scope=local; update both bridges before coordinated unpair")
+                cleanup = _cleanup_peer_artifacts(peer_id, "", dry_run=dry_run)
+                result = {
+                    "status": "preview" if dry_run else "local_only",
+                    "scope": "local",
+                    "peer_id": peer_id,
+                    "url": expected_url,
+                    "remote_cleanup_required": True,
+                    "artifact_cleanup": cleanup,
+                }
+            result["cancel_active_tasks_requested"] = bool(cancel_active_tasks)
+            result.setdefault("known_active_peer_tasks_cancelled", 0)
+            return _json(result)
+        except Exception as exc:
+            return _json({
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "peer_id": peer_id,
+                "scope": scope,
+                "next_action": "Call bridge_network_status, verify the exact fingerprint or URL, then retry; use scope=local only when coordinated cleanup is impossible.",
+            })
+
+    @mcp.tool()
+    def bridge_pairing_window(action: str, peer_id: str, expected_fingerprint: str, ttl_seconds: int = 300) -> str:
+        """Open a short-lived, fingerprint-bound approval window, then approve that exact candidate."""
+        try:
+            return _json(_network_manager().pairing_window(action, peer_id, expected_fingerprint, ttl_seconds))
+        except Exception as exc:
+            return _json({"error": str(exc), "error_type": type(exc).__name__, "action": action, "peer_id": peer_id})
+
+    @mcp.tool()
+    def bridge_peer_diagnostics(peer_id: str, include_hermes_probe: bool = False) -> str:
+        """Compare this bridge's peer configuration with the remote bridge's sanitized status.
+
+        This is intended for Codex and other MCP clients: it uses the normal
+        pinned peer route, never exposes a credential, and can optionally ask
+        the remote Hermes bridge for its readiness status.
+        """
+        try:
+            local_peer, error = _get_peer(peer_id)
+            if not local_peer:
+                return _json({"peer_id": peer_id, "reachable": False, "error": error})
+            remote = _peer_call(peer_id, "bridge_agent_status", {})
+            result = {
+                "peer_id": peer_id,
+                "reachable": True,
+                "managed": bool(local_peer.get("managed")),
+                "certificate_pinned": bool(local_peer.get("cert_pem")),
+                "credential_configured": bool(local_peer.get("token") or local_peer.get("pair_key") or local_peer.get("token_env") or local_peer.get("pair_key_env")),
+                "remote_bridge_version": remote.get("bridge_version"),
+                "remote_hermes_available": remote.get("hermes_available"),
+            }
+            if include_hermes_probe:
+                result["remote_hermes_status"] = remote.get("hermes_version") or "reported-unavailable"
+            return _json(result)
+        except Exception as exc:
+            return _json({"peer_id": peer_id, "reachable": False, "error_type": type(exc).__name__, "error": str(exc)})
+
+    @mcp.tool()
     def bridge_agent_status() -> str:
         """Local bridge only: report this machine's Hermes Bridge status, configured peers, and routing guidance."""
         return windows_agent_status()
@@ -1279,7 +1479,7 @@ def add_bridge_tools(mcp):
     # If bridge_pairing_tools.py is not present, the bridge works as before.
     try:
         from bridge_pairing_tools import add_pairing_tools
-        add_pairing_tools(mcp)
+        add_pairing_tools(mcp, _network_manager())
     except Exception:
         pass  # Module is optional — bridge works without it
 
@@ -1307,6 +1507,8 @@ def _create_delegate_only_server(
     port: int = 8000,
     auth_token: Optional[str] = None,
     network_manager: Optional[NetworkManager] = None,
+    stateless_http: bool = False,
+    json_response: bool = False,
 ) -> "FastMCP":
     tokens = _auth_tokens(auth_token)
     return _BearerOnlyFastMCP(
@@ -1327,6 +1529,8 @@ def _create_delegate_only_server(
         host=host,
         port=port,
         streamable_http_path="/mcp",
+        stateless_http=stateless_http,
+        json_response=json_response,
         auth=None,
         bearer_tokens=tokens,
         token_provider=network_manager.state.inbound_tokens if network_manager else None,
@@ -1342,6 +1546,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--auth-token", default=_configured_auth_token())
     parser.add_argument("--allow-unsafe-lan", action="store_true", default=os.environ.get("HERMES_BRIDGE_ALLOW_UNSAFE_LAN") == "1")
     parser.add_argument("--secure-network", action="store_true", default=os.environ.get("HERMES_BRIDGE_SECURE_NETWORK") == "1")
+    parser.add_argument("--stateless-http", action="store_true", default=os.environ.get("HERMES_BRIDGE_STATELESS_HTTP") == "1")
+    parser.add_argument("--json-response", action="store_true", default=os.environ.get("HERMES_BRIDGE_JSON_RESPONSE") == "1")
     parser.add_argument("--dry-run", action="store_true", help="Print resolved runtime paths, ports, discovery, and isolation settings without writing or starting services.")
     return parser
 
@@ -1362,7 +1568,14 @@ def main() -> None:
             raise SystemExit(auth_error)
 
     manager = _network_manager() if args.secure_network else None
-    server = _create_delegate_only_server(args.host, args.port, args.auth_token, network_manager=manager)
+    server = _create_delegate_only_server(
+        args.host,
+        args.port,
+        args.auth_token,
+        network_manager=manager,
+        stateless_http=args.stateless_http,
+        json_response=args.json_response,
+    )
     add_bridge_tools(server)
 
     async def _run() -> None:
@@ -1373,7 +1586,7 @@ def main() -> None:
             discovery = None
             recovery = RecoveryWorker(manager, float(os.environ.get("HERMES_BRIDGE_RECOVERY_INTERVAL", "30")))
             recovery.start()
-            if os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "0") == "1":
+            if os.environ.get("HERMES_BRIDGE_AUTO_DISCOVERY", "1") != "0":
                 backend = os.environ.get("HERMES_BRIDGE_DISCOVERY_BACKEND", "mdns")
                 if backend == "mdns":
                     discovery = MdnsDiscovery(manager, args.host, args.port)
