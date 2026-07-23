@@ -16,6 +16,12 @@ Automated verification for the bridge's compatibility, security, discovery, pair
 ## Verification
 
 - Assert the 11 stable core tool names and schemas separately from optional extension tools.
+- Cover the four universal extension tools separately, including native MCP,
+  declarative MCP and CLI adapters, unknown/disabled agents, malformed
+  manifests, injection resistance, secret redaction, cancellation, timeouts,
+  Codex `threadId`/`sessionId`, and caller-scoped conversation persistence.
+- Verify canonical environment precedence, compatibility-aware state paths,
+  dual discovery registration, and legacy-peer rejection for universal calls.
 - Cover approval, rejection, replay, expiry, certificate mismatch, revocation, restart, endpoint change, and identity-preserving rekey.
 - Cover coordinated unpair, dry-run, forced local forget, fingerprint mismatch, retry/idempotency, and cleanup of stale pairing artifacts.
 - Exercise signed introductions and confirm introduced unknown identities remain candidates until approval.

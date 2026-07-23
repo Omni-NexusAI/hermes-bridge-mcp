@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import contextvars
 import hashlib
 import importlib.metadata
 import json
@@ -17,6 +18,17 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
+
+
+def _normalize_agent_bridge_env() -> None:
+    """Make canonical Agent Bridge variables authoritative over legacy aliases."""
+    for key, value in list(os.environ.items()):
+        if key.startswith("AGENT_BRIDGE_"):
+            os.environ[f"HERMES_BRIDGE_{key[len('AGENT_BRIDGE_'):]}"] = value
+
+
+_normalize_agent_bridge_env()
+
 
 def _default_hermes_home() -> Path:
     explicit = os.environ.get("HERMES_BRIDGE_HOME") or os.environ.get("HERMES_HOME")
@@ -50,10 +62,23 @@ def _default_hermes_exe(home: Path, agent: Path) -> Path:
     return Path(found) if found else agent / "venv" / "bin" / "hermes"
 
 
+def _default_agent_bridge_home() -> Path:
+    explicit = os.environ.get("AGENT_BRIDGE_HOME") or os.environ.get("HERMES_BRIDGE_HOME")
+    if explicit:
+        return Path(explicit).expanduser()
+    if os.name == "nt":
+        local = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        canonical, legacy = local / "agent-bridge", local / "hermes"
+    else:
+        canonical, legacy = Path.home() / ".agent-bridge", Path.home() / ".hermes"
+    return legacy if (legacy / "bridge-state").exists() else canonical
+
+
 HERMES_HOME = _default_hermes_home()
 HERMES_AGENT = _default_hermes_agent(HERMES_HOME)
 HERMES_EXE = _default_hermes_exe(HERMES_HOME, HERMES_AGENT)
-BRIDGE_VERSION = "v1.3.1"
+AGENT_BRIDGE_HOME = _default_agent_bridge_home()
+BRIDGE_VERSION = "v1.3.5"
 MIN_COMPATIBLE_BRIDGE_VERSION = "v1.2.7"
 DEFAULT_PUBLIC_TOOLS = (
     "bridge_agent_status",
@@ -73,20 +98,54 @@ NETWORK_EXTENSION_TOOLS = (
     "bridge_peer_pair",
     "bridge_peer_unpair",
 )
+UNIVERSAL_EXTENSION_TOOLS = (
+    "bridge_agent_universal_list",
+    "bridge_agent_universal_delegate_start",
+    "bridge_peer_universal_list",
+    "bridge_peer_universal_delegate_start",
+)
 DEFAULT_CWD = Path.home()
-BRIDGE_STATE_DIR = Path(os.environ.get("HERMES_BRIDGE_STATE_DIR", str(HERMES_HOME / "bridge-state"))).expanduser()
-BRIDGE_STATE_FILE = Path(
+BRIDGE_STATE_DIR = Path(
     os.environ.get(
-        "HERMES_BRIDGE_STATE_FILE",
-        str(BRIDGE_STATE_DIR / ("windows-hermes-proxy-state.json" if os.name == "nt" else "hermes-bridge-state.json")),
+        "AGENT_BRIDGE_STATE_DIR",
+        os.environ.get("HERMES_BRIDGE_STATE_DIR", str(AGENT_BRIDGE_HOME / "bridge-state")),
     )
 ).expanduser()
-PEER_CONFIG_FILE = Path(os.environ.get("HERMES_BRIDGE_PEERS_CONFIG", str(BRIDGE_STATE_DIR / "peers.json"))).expanduser()
+
+
+def _default_bridge_state_file() -> Path:
+    explicit = os.environ.get("AGENT_BRIDGE_STATE_FILE") or os.environ.get(
+        "HERMES_BRIDGE_STATE_FILE"
+    )
+    if explicit:
+        return Path(explicit).expanduser()
+    legacy_names = (
+        "windows-hermes-proxy-state.json",
+        "hermes-bridge-state.json",
+    )
+    for name in legacy_names:
+        candidate = BRIDGE_STATE_DIR / name
+        if candidate.exists():
+            return candidate
+    return BRIDGE_STATE_DIR / "agent-bridge-state.json"
+
+
+BRIDGE_STATE_FILE = _default_bridge_state_file()
+PEER_CONFIG_FILE = Path(
+    os.environ.get(
+        "AGENT_BRIDGE_PEERS_CONFIG",
+        os.environ.get("HERMES_BRIDGE_PEERS_CONFIG", str(BRIDGE_STATE_DIR / "peers.json")),
+    )
+).expanduser()
 ANDROID_SHARED_PEER_CONFIG_FILES = (
     Path("/sdcard/Download/hermes-q3-peers.json"),
     Path("/storage/self/primary/Download/hermes-q3-peers.json"),
 )
-LOCAL_PEER_ID = os.environ.get("HERMES_BRIDGE_PEER_ID") or f"{platform.node() or 'hermes'}-{platform.system().lower() or 'peer'}"
+LOCAL_PEER_ID = (
+    os.environ.get("AGENT_BRIDGE_PEER_ID")
+    or os.environ.get("HERMES_BRIDGE_PEER_ID")
+    or f"{platform.node() or 'agent'}-{platform.system().lower() or 'peer'}"
+)
 TASK_RETENTION_SECONDS = 24 * 60 * 60
 DEFAULT_INLINE_WAIT_SECONDS = 30
 DEFAULT_HARD_TIMEOUT_SECONDS = 6 * 3600
@@ -115,6 +174,11 @@ SESSION_ID_RE = re.compile(r"session_id:\s*([A-Za-z0-9_.:-]+)", re.IGNORECASE)
 _STATE_LOCK = threading.RLock()
 _TASKS: dict[str, dict[str, Any]] = {}
 _PROCS: dict[str, subprocess.Popen] = {}
+_UNIVERSAL_THREADS: dict[str, threading.Thread] = {}
+_UNIVERSAL_CANCEL_EVENTS: dict[str, threading.Event] = {}
+_CALLER_PEER_CONTEXT: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "agent_bridge_caller_peer", default="local"
+)
 
 import httpx  # noqa: E402
 from mcp import ClientSession  # noqa: E402
@@ -140,10 +204,13 @@ from hermes_bridge_network import (  # noqa: E402
     runtime_plan,
     validate_sandbox_config,
 )
+from agent_bridge_universal import UniversalAdapterError, UniversalAgentRegistry  # noqa: E402
 
-os.environ.setdefault("HERMES_BRIDGE_VERSION", BRIDGE_VERSION)
+os.environ.setdefault("AGENT_BRIDGE_VERSION", BRIDGE_VERSION)
+os.environ["HERMES_BRIDGE_VERSION"] = os.environ["AGENT_BRIDGE_VERSION"]
 
 _NETWORK_MANAGER: Optional[NetworkManager] = None
+_UNIVERSAL_REGISTRY: Optional[UniversalAgentRegistry] = None
 
 
 def _network_manager() -> NetworkManager:
@@ -153,6 +220,13 @@ def _network_manager() -> NetworkManager:
         _NETWORK_MANAGER = NetworkManager(BRIDGE_STATE_DIR, secure_port=secure_port)
         _NETWORK_MANAGER.set_artifact_cleanup(_cleanup_peer_artifacts)
     return _NETWORK_MANAGER
+
+
+def _universal_registry() -> UniversalAgentRegistry:
+    global _UNIVERSAL_REGISTRY
+    if _UNIVERSAL_REGISTRY is None:
+        _UNIVERSAL_REGISTRY = UniversalAgentRegistry(BRIDGE_STATE_DIR, HERMES_EXE)
+    return _UNIVERSAL_REGISTRY
 
 
 class _SharedTokenVerifier(TokenVerifier):
@@ -168,11 +242,19 @@ class _SharedTokenVerifier(TokenVerifier):
 
 
 class _BearerTokenMiddleware:
-    def __init__(self, app: Any, tokens: list[str], path: str, token_provider=None):
+    def __init__(
+        self,
+        app: Any,
+        tokens: list[str],
+        path: str,
+        token_provider=None,
+        peer_resolver=None,
+    ):
         self.app = app
         self.tokens = {token for token in tokens if token}
         self.path = path
         self.token_provider = token_provider
+        self.peer_resolver = peer_resolver
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope.get("type") != "http" or scope.get("path") != self.path:
@@ -189,7 +271,12 @@ class _BearerTokenMiddleware:
         if self.token_provider:
             allowed.update(item for item in self.token_provider() if item)
         if scheme.lower() == "bearer" and token and any(secrets.compare_digest(token, item) for item in allowed):
-            await self.app(scope, receive, send)
+            caller_peer = self.peer_resolver(token) if self.peer_resolver else None
+            context_token = _CALLER_PEER_CONTEXT.set(caller_peer or "local")
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                _CALLER_PEER_CONTEXT.reset(context_token)
             return
 
         await send({
@@ -249,6 +336,11 @@ class _BearerOnlyFastMCP(FastMCP):
                 self._bridge_bearer_tokens,
                 self.settings.streamable_http_path,
                 token_provider=self._bridge_token_provider,
+                peer_resolver=(
+                    self._bridge_network_manager.state.peer_id_for_inbound_token
+                    if self._bridge_network_manager
+                    else None
+                ),
             )
         if self._bridge_network_manager:
             app = NetworkASGI(app, self._bridge_network_manager)
@@ -270,6 +362,13 @@ def _tail(text: str, max_chars: int = 8000) -> str:
     if not text:
         return ""
     return text[-max_chars:]
+
+
+def _package_version(package: str) -> str:
+    try:
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        return "unavailable"
 
 
 def _now() -> float:
@@ -370,7 +469,7 @@ def _update_session_record(a0_thread_key: str, session_id: str, cwd: Optional[Pa
             "session_id": session_id,
             "updated_at": _now(),
             "cwd": str(cwd) if cwd else "",
-            "source": "mcp-hermes-bridge",
+            "source": "mcp-agent-bridge",
         }
         _save_state(data)
 
@@ -599,7 +698,7 @@ def _build_delegate_args(prompt: str, max_turns: int, session_id: Optional[str])
         "chat",
         "--query", prompt,
         "--quiet",
-        "--source", "mcp-hermes-bridge",
+        "--source", "mcp-agent-bridge",
         "--accept-hooks",
         "--pass-session-id",
         "--max-turns", str(max_turns),
@@ -730,13 +829,189 @@ def _start_delegate_task(prepared: dict, hard_timeout_seconds: int, wait_timeout
     return _public_task_record(record)
 
 
+def _complete_universal_task(
+    task_id: str,
+    agent: str,
+    prompt: str,
+    cwd: Optional[Path],
+    max_turns: int,
+    caller_peer: str,
+    conversation_key: str,
+    hard_timeout_seconds: int,
+    cancel_event: threading.Event,
+) -> None:
+    try:
+        result = _universal_registry().execute(
+            agent=agent,
+            prompt=prompt,
+            cwd=cwd,
+            max_turns=max_turns,
+            caller_peer=caller_peer,
+            conversation_key=conversation_key,
+            hard_timeout_seconds=hard_timeout_seconds,
+            cancel_event=cancel_event,
+        )
+    except asyncio.TimeoutError:
+        result = {
+            "status": "timed_out",
+            "exit_code": None,
+            "stdout": "",
+            "stderr_tail": "Universal agent adapter exceeded its hard timeout.",
+        }
+    except UniversalAdapterError as exc:
+        result = {
+            "status": "failed",
+            "error": exc.code,
+            "exit_code": None,
+            "stdout": "",
+            "stderr_tail": str(exc),
+        }
+    except Exception as exc:
+        result = {
+            "status": "failed",
+            "error": "agent_error",
+            "exit_code": None,
+            "stdout": "",
+            "stderr_tail": f"{type(exc).__name__}: {exc}",
+        }
+
+    finished = _now()
+    with _STATE_LOCK:
+        record = _TASKS.get(task_id)
+        if not record:
+            return
+        status = str(result.get("status") or "failed")
+        if record.get("status") == "canceled":
+            status = "canceled"
+        record.update({
+            "status": status,
+            "exit_code": result.get("exit_code"),
+            "timed_out": status == "timed_out",
+            "elapsed_ms": int((finished - float(record["started_at"])) * 1000),
+            "finished_at": finished,
+            "updated_at": finished,
+            "stdout": _tail(str(result.get("stdout") or "")),
+            "stderr_tail": _tail(str(result.get("stderr_tail") or "")),
+            "last_output_at": finished if result.get("stdout") or result.get("stderr_tail") else None,
+            "session_id": result.get("session_id"),
+            "resumed_session": bool(result.get("resumed_session")),
+            "remote_task_id": result.get("remote_task_id"),
+            "error": result.get("error"),
+        })
+        _TASKS[task_id] = record
+        _UNIVERSAL_THREADS.pop(task_id, None)
+        _UNIVERSAL_CANCEL_EVENTS.pop(task_id, None)
+        public = _public_task_record(record)
+    _persist_task(public)
+
+
+def _start_universal_task(
+    agent: str,
+    prompt: str,
+    cwd: Optional[str],
+    timeout_seconds: Any,
+    max_turns: Any,
+    conversation_key: Optional[str],
+    hard_timeout_seconds: Optional[Any],
+) -> dict[str, Any]:
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {"error": "invalid_request", "message": "prompt is required"}
+    agent_id = str(agent or "").strip().lower()
+    try:
+        known = {item["agent"]: item for item in _universal_registry().public_agents()}
+    except UniversalAdapterError as exc:
+        return {"error": exc.code, "message": str(exc)}
+    selected = known.get(agent_id)
+    if not selected or not selected.get("enabled") or not selected.get("available"):
+        return {"error": "agent_unavailable", "agent": agent_id}
+    timeout_i, timeout_error = _coerce_int_value(
+        timeout_seconds, "timeout_seconds", 3600, 1, MAX_HARD_TIMEOUT_SECONDS
+    )
+    if timeout_error:
+        return {"error": "invalid_request", "message": timeout_error}
+    max_turns_i, turns_error = _coerce_int_value(max_turns, "max_turns", 90, 1, 200)
+    if turns_error:
+        return {"error": "invalid_request", "message": turns_error}
+    run_cwd, cwd_error = _convert_cwd(cwd)
+    if cwd_error:
+        return {"error": "invalid_request", "message": cwd_error}
+    shape = _estimate_task_shape(prompt, max_turns_i or 90, timeout_i or 3600)
+    if hard_timeout_seconds is None or str(hard_timeout_seconds).strip() == "":
+        hard_timeout_i = int(shape["hard_timeout_seconds"])
+    else:
+        hard_timeout_i, hard_error = _coerce_int_value(
+            hard_timeout_seconds,
+            "hard_timeout_seconds",
+            DEFAULT_HARD_TIMEOUT_SECONDS,
+            1,
+            MAX_HARD_TIMEOUT_SECONDS,
+        )
+        if hard_error:
+            return {"error": "invalid_request", "message": hard_error}
+    conversation = str(conversation_key or "default").strip()
+    task_id = uuid.uuid4().hex
+    started_at = _now()
+    record = {
+        "task_id": task_id,
+        "status": "running",
+        "started_at": started_at,
+        "updated_at": started_at,
+        "finished_at": None,
+        "elapsed_ms": 0,
+        "exit_code": None,
+        "timed_out": False,
+        "stdout": "",
+        "stderr_tail": "",
+        "cwd": str(run_cwd),
+        "cwd_path": run_cwd,
+        "timeout_seconds": timeout_i,
+        "hard_timeout_seconds": hard_timeout_i,
+        "hard_deadline_at": started_at + int(hard_timeout_i or DEFAULT_HARD_TIMEOUT_SECONDS),
+        "recommended_poll_seconds": shape["recommended_poll_seconds"],
+        "poll_after_seconds": shape["recommended_poll_seconds"],
+        "estimated_remaining_seconds": shape["estimated_remaining_seconds"],
+        "likely_long_task": shape["likely_long"],
+        "max_turns": max_turns_i,
+        "agent": agent_id,
+        "adapter_kind": selected.get("adapter_kind"),
+        "conversation_key": conversation,
+        "caller_peer": _CALLER_PEER_CONTEXT.get(),
+        "prompt": prompt.strip(),
+    }
+    cancel_event = threading.Event()
+    thread = threading.Thread(
+        target=_complete_universal_task,
+        args=(
+            task_id,
+            agent_id,
+            prompt.strip(),
+            run_cwd,
+            int(max_turns_i or 90),
+            str(record["caller_peer"]),
+            conversation,
+            int(hard_timeout_i or DEFAULT_HARD_TIMEOUT_SECONDS),
+            cancel_event,
+        ),
+        daemon=True,
+        name=f"agent-bridge-{agent_id}-{task_id[:8]}",
+    )
+    with _STATE_LOCK:
+        _TASKS[task_id] = record
+        _UNIVERSAL_THREADS[task_id] = thread
+        _UNIVERSAL_CANCEL_EVENTS[task_id] = cancel_event
+    _persist_task(record)
+    thread.start()
+    return _public_task_record(record)
+
+
 def _task_status(task_id: str) -> Optional[dict]:
     with _STATE_LOCK:
         record = _TASKS.get(task_id)
     if record:
         proc = _PROCS.get(task_id)
         public = _public_task_record(record)
-        if proc and proc.poll() is None:
+        universal_thread = _UNIVERSAL_THREADS.get(task_id)
+        if (proc and proc.poll() is None) or (universal_thread and universal_thread.is_alive()):
             public["elapsed_ms"] = int((_now() - float(record["started_at"])) * 1000)
             public = _enrich_task_record(public)
         return public
@@ -887,6 +1162,12 @@ def _cleanup_peer_artifacts(peer_id: str, fingerprint: str, dry_run: bool = Fals
             for key in matching_keys:
                 sessions.pop(key, None)
             _save_state(data)
+    try:
+        result["universal_session_bindings"] = _universal_registry().forget_peer(
+            peer_id, dry_run=dry_run
+        )
+    except Exception as exc:
+        result["universal_session_cleanup_error"] = f"{type(exc).__name__}: {exc}"
     result["fingerprint_verified"] = bool(fingerprint)
     return result
 
@@ -1049,6 +1330,53 @@ def _peer_call(peer_id: str, tool_name: str, arguments: dict[str, Any]) -> dict[
     return _peer_result(peer, tool_name, remote)
 
 
+def _peer_universal_call(
+    peer_id: str, tool_name: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    peer, err = _get_peer(peer_id)
+    if err:
+        return _peer_error_response(peer_id, err, peer)
+    if not peer.get("managed") or not peer.get("cert_pem"):
+        return {
+            "error": "extension_unsupported",
+            "message": (
+                "universal agent routing requires an authenticated, "
+                "certificate-pinned managed peer"
+            ),
+            "peer_id": peer_id,
+            "remote_tool_called": tool_name,
+            "next_action": (
+                "Pair this device through secure discovery and approve its full "
+                "certificate fingerprint before using bridge_peer_universal_*."
+            ),
+        }
+    result = _peer_call(peer_id, tool_name, arguments)
+    error_text = " ".join(
+        str(result.get(key) or "")
+        for key in ("error", "message", "error_type")
+    ).lower()
+    if result.get("error") and any(
+        marker in error_text
+        for marker in (
+            "method not found",
+            "tool not found",
+            "unknown tool",
+            "bridge_agent_universal",
+        )
+    ):
+        return {
+            "error": "extension_unsupported",
+            "message": "the paired peer does not expose universal_agent_v1",
+            "peer_id": peer_id,
+            "remote_tool_called": tool_name,
+            "next_action": (
+                "Use the legacy Hermes bridge_peer_* tools or update the remote "
+                "bridge to Agent Bridge MCP v1.3.5 or newer."
+            ),
+        }
+    return result
+
+
 def _peer_delegate_start(
     peer_id: str,
     prompt: str,
@@ -1092,12 +1420,17 @@ def add_bridge_tools(mcp):
         except Exception as exc:
             network = {"extension": "automatic_pairing_v1", "error": f"{type(exc).__name__}: {exc}"}
         return _json({
+            "product": "Agent Bridge MCP",
+            "mcp_identifier": "agent-bridge",
             "bridge_version": BRIDGE_VERSION,
-            "build_revision": os.environ.get("HERMES_BRIDGE_BUILD_REVISION", "source"),
+            "build_revision": os.environ.get(
+                "AGENT_BRIDGE_BUILD_REVISION",
+                os.environ.get("HERMES_BRIDGE_BUILD_REVISION", "source"),
+            ),
             "mcp_transport": "native_stateless_streamable_http_json",
             "network_state_schema": 2,
             "runtime_dependencies": {
-                package: (importlib.metadata.version(package) if package else "")
+                package: _package_version(package)
                 for package in ("mcp", "httpx", "uvicorn", "cryptography", "zeroconf")
             },
             "min_compatible_bridge_version": MIN_COMPATIBLE_BRIDGE_VERSION,
@@ -1105,6 +1438,7 @@ def add_bridge_tools(mcp):
             "hermes_exe": str(HERMES_EXE),
             "hermes_home": str(HERMES_HOME),
             "hermes_agent": str(HERMES_AGENT),
+            "agent_bridge_home": str(AGENT_BRIDGE_HOME),
             "bridge_state_file": str(BRIDGE_STATE_FILE),
             "peer_config_file": str(PEER_CONFIG_FILE),
             "peer_config_candidates": [str(candidate) for candidate in _peer_config_candidates()],
@@ -1121,8 +1455,10 @@ def add_bridge_tools(mcp):
             "public_tool_contract": {
                 "default_tool_count": len(DEFAULT_PUBLIC_TOOLS),
                 "default_tools": list(DEFAULT_PUBLIC_TOOLS),
-                "extension_tools": list(NETWORK_EXTENSION_TOOLS),
+                "extension_tools": list(NETWORK_EXTENSION_TOOLS + UNIVERSAL_EXTENSION_TOOLS),
                 "automatic_pairing_extension": "automatic_pairing_v1",
+                "universal_agent_extension": "universal_agent_v1",
+                "universal_tools": list(UNIVERSAL_EXTENSION_TOOLS),
                 "legacy_windows_tools_env": "HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS",
                 "stable_since": MIN_COMPATIBLE_BRIDGE_VERSION,
             },
@@ -1134,6 +1470,7 @@ def add_bridge_tools(mcp):
             "delegate_runner_available": _delegate_runner_available(),
             "delegate_requires_telegram_gateway": False,
             "delegate_transport": "local hermes chat subprocess via Hermes Bridge",
+            "universal_agents": _universal_registry().public_agents(),
             "tracked_a0_threads": len(state.get("sessions", {})),
             "tracked_tasks": len(state.get("tasks", {})),
             "hermes_version": hermes_version,
@@ -1253,14 +1590,28 @@ def add_bridge_tools(mcp):
 
     @legacy_windows_tool
     def windows_agent_delegate_cancel(task_id: str) -> str:
-        """Cancel a running Hermes delegation task."""
+        """Cancel a running legacy or universal delegation task."""
         if not isinstance(task_id, str) or not task_id.strip():
             return _json({"error": "task_id is required"})
         task_id = task_id.strip()
         proc = _PROCS.get(task_id)
+        universal_cancel = _UNIVERSAL_CANCEL_EVENTS.get(task_id)
         status = _task_status(task_id)
         if not status:
             return _json({"error": f"task not found: {task_id}"})
+        if universal_cancel:
+            universal_cancel.set()
+            with _STATE_LOCK:
+                record = _TASKS.get(task_id, {})
+                record.update({
+                    "status": "canceled",
+                    "finished_at": _now(),
+                    "updated_at": _now(),
+                    "elapsed_ms": int((_now() - float(record.get("started_at", _now()))) * 1000),
+                })
+                _TASKS[task_id] = record
+            _persist_task(record)
+            return _json(_public_task_record(record))
         if not proc or proc.poll() is not None:
             return _json(status)
         _terminate_process_tree(proc)
@@ -1307,6 +1658,41 @@ def add_bridge_tools(mcp):
     def bridge_peer_delegate_cancel(peer_id: str, task_id: str) -> str:
         """Network peer only: cancel a task started with bridge_peer_delegate_start on another configured device."""
         return _json(_peer_call(peer_id, "bridge_agent_delegate_cancel", {"task_id": task_id}))
+
+    @mcp.tool()
+    def bridge_peer_universal_list(peer_id: str) -> str:
+        """List enabled universal agents on one authenticated, certificate-pinned peer."""
+        return _json(
+            _peer_universal_call(peer_id, "bridge_agent_universal_list", {})
+        )
+
+    @mcp.tool()
+    def bridge_peer_universal_delegate_start(
+        peer_id: str,
+        agent: str,
+        prompt: str,
+        cwd: Optional[str] = None,
+        timeout_seconds: int = 3600,
+        max_turns: int = 90,
+        conversation_key: Optional[str] = None,
+        hard_timeout_seconds: Optional[int] = None,
+    ) -> str:
+        """Start work on a selected agent architecture hosted by an authenticated peer."""
+        arguments = {
+            "agent": agent,
+            "prompt": prompt,
+            "cwd": cwd,
+            "timeout_seconds": timeout_seconds,
+            "max_turns": max_turns,
+            "conversation_key": conversation_key,
+        }
+        if hard_timeout_seconds is not None:
+            arguments["hard_timeout_seconds"] = hard_timeout_seconds
+        return _json(
+            _peer_universal_call(
+                peer_id, "bridge_agent_universal_delegate_start", arguments
+            )
+        )
 
     @mcp.tool()
     def bridge_network_status() -> str:
@@ -1472,6 +1858,41 @@ def add_bridge_tools(mcp):
         """Local bridge only: cancel a task started with bridge_agent_delegate_start on this same machine."""
         return windows_agent_delegate_cancel(task_id)
 
+    @mcp.tool()
+    def bridge_agent_universal_list() -> str:
+        """List locally enabled universal agent adapters and sanitized capabilities."""
+        try:
+            return _json({
+                "extension": "universal_agent_v1",
+                "bridge_version": BRIDGE_VERSION,
+                "agents": _universal_registry().public_agents(),
+            })
+        except UniversalAdapterError as exc:
+            return _json({"error": exc.code, "message": str(exc)})
+
+    @mcp.tool()
+    def bridge_agent_universal_delegate_start(
+        agent: str,
+        prompt: str,
+        cwd: Optional[str] = None,
+        timeout_seconds: int = 3600,
+        max_turns: int = 90,
+        conversation_key: Optional[str] = None,
+        hard_timeout_seconds: Optional[int] = None,
+    ) -> str:
+        """Start local work on a selected universal agent adapter."""
+        return _json(
+            _start_universal_task(
+                agent,
+                prompt,
+                cwd,
+                timeout_seconds,
+                max_turns,
+                conversation_key,
+                hard_timeout_seconds,
+            )
+        )
+
     # --- Pairing management tools (optional, architecture-agnostic) ---
     # Provides bridge_manual_pair, bridge_pair_status, bridge_repair_peer,
     # bridge_discovery_scan, bridge_discovery_pair as MCP tools that any
@@ -1512,13 +1933,16 @@ def _create_delegate_only_server(
 ) -> "FastMCP":
     tokens = _auth_tokens(auth_token)
     return _BearerOnlyFastMCP(
-        "hermes-bridge",
+        "agent-bridge",
         instructions=(
-            "Hermes Bridge has two tool families. Use bridge_agent_* only for "
-            "the local Hermes agent running on this same bridge endpoint. Never "
+            "Agent Bridge MCP has local and peer tool families. Use "
+            "bridge_agent_* only for the local Hermes agent; those existing "
+            "calls remain Hermes-compatible. Use "
+            "bridge_agent_universal_* to select an enabled local agent adapter. Never "
             "use bridge_agent_* to reach another machine, headset, phone, or "
-            "network device. Use bridge_peer_* with peer_id for authenticated "
-            "Hermes-to-Hermes network delegation to configured peers. If peer_id "
+            "network device. Use bridge_peer_* with peer_id for legacy Hermes "
+            "delegation, or bridge_peer_universal_* to select an agent on an "
+            "authenticated certificate-pinned peer. If peer_id "
             "is unknown, call bridge_agent_status first and read configured_peers "
             "and tool_routing. For long tasks, use the *_delegate_start tool and "
             "poll the matching *_delegate_status/result tools with the returned "
@@ -1539,7 +1963,7 @@ def _create_delegate_only_server(
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Hermes Bridge MCP")
+    parser = argparse.ArgumentParser(description="Agent Bridge MCP")
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default=os.environ.get("HERMES_BRIDGE_TRANSPORT", "stdio"))
     parser.add_argument("--host", default=os.environ.get("HERMES_BRIDGE_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("HERMES_BRIDGE_PORT", "8000")))

@@ -1,7 +1,7 @@
 # Automatic Pairing Validation on Unpaired Devices
 
 Use this checklist only on devices that are not part of the existing paired
-agent network. Bridge v1.3.0 is a release candidate; existing agents should
+agent network. Agent Bridge MCP v1.3.5 is a release candidate; existing agents should
 remain untouched until this validation is complete.
 
 ## Before Installation
@@ -84,7 +84,7 @@ credentials. Re-pairing requires an explicit new approval.
 
 ## Rollback
 
-1. Stop the v1.3.0 peer launcher on the test devices.
+1. Stop the v1.3.5 peer launcher on the test devices.
 2. Disable or remove `HERMES_BRIDGE_AUTO_DISCOVERY`.
 3. Restore the prior bridge checkout or reinstall the prior version.
 4. Remove the test device's `bridge-state/network` directory only if its new

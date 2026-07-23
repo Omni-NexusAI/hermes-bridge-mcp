@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Portable Hermes Bridge installer.
+"""Portable Agent Bridge installer.
 
 This deliberately manages only the bridge payload and its virtual environment.
 It never installs Hermes, changes agent configuration, pairs devices, or touches
@@ -22,17 +22,30 @@ REPO = "Omni-NexusAI/hermes-bridge-mcp"
 PAYLOAD = ("bin", "config", "docs", "scripts", "requirements-bridge.txt", "README.md")
 
 
-def hermes_home() -> Path:
-    explicit = os.environ.get("HERMES_BRIDGE_HOME") or os.environ.get("HERMES_HOME")
+def agent_bridge_home() -> Path:
+    explicit = os.environ.get("AGENT_BRIDGE_HOME") or os.environ.get("HERMES_BRIDGE_HOME")
     if explicit:
         return Path(explicit).expanduser()
     if os.name == "nt":
-        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "hermes"
-    return Path.home() / ".hermes"
+        local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        canonical, legacy = local / "agent-bridge", local / "hermes"
+    else:
+        canonical, legacy = Path.home() / ".agent-bridge", Path.home() / ".hermes"
+    return legacy if (legacy / "bridge-state").exists() else canonical
+
+
+def hermes_home() -> Path:
+    """Compatibility alias retained for callers of the Hermes-era bootstrap API."""
+    return agent_bridge_home()
 
 
 def bridge_root() -> Path:
-    return Path(os.environ.get("HERMES_BRIDGE_INSTALL_ROOT", hermes_home() / "bridge-runtime")).expanduser()
+    return Path(
+        os.environ.get(
+            "AGENT_BRIDGE_INSTALL_ROOT",
+            os.environ.get("HERMES_BRIDGE_INSTALL_ROOT", agent_bridge_home() / "bridge-runtime"),
+        )
+    ).expanduser()
 
 
 def version(source: Path) -> str:
@@ -64,7 +77,7 @@ def install(source: Path, start: bool, dependencies: bool) -> dict:
     releases.mkdir(parents=True, exist_ok=True)
     release = releases / version(source)
     if not release.exists():
-        stage = Path(tempfile.mkdtemp(prefix="hermes-bridge-", dir=releases))
+        stage = Path(tempfile.mkdtemp(prefix="agent-bridge-", dir=releases))
         try:
             for item in PAYLOAD:
                 src, dst = source / item, stage / item
@@ -83,23 +96,39 @@ def install(source: Path, start: bool, dependencies: bool) -> dict:
     if dependencies:
         subprocess.check_call([str(python_in(venv_dir)), "-m", "pip", "install", "-r", str(release / "requirements-bridge.txt")])
     (root / "current.json").write_text(json.dumps({"release": str(release), "previous": str(prior) if prior else None}, indent=2), encoding="utf-8")
-    result = {"status": "installed", "release": str(release), "bridge_root": str(root), "state_preserved": str(hermes_home() / "bridge-state")}
+    result = {
+        "status": "installed",
+        "product": "Agent Bridge MCP",
+        "release": str(release),
+        "bridge_root": str(root),
+        "state_preserved": str(agent_bridge_home() / "bridge-state"),
+    }
     if start:
         if os.name == "nt":
-            launcher = release / "bin" / "start-windows-hermes-bridge.ps1"
-            peer_launcher = release / "bin" / "start-windows-hermes-peer-bridge.ps1"
+            launcher = release / "bin" / "start-agent-bridge.ps1"
+            peer_launcher = release / "bin" / "start-agent-bridge-peer.ps1"
             subprocess.check_call(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher)])
             subprocess.check_call(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(peer_launcher)])
             result["start"] = "native local and secure peer listeners started"
         else:
-            result["start"] = "Install complete; run bin/start-hermes-bridge-peer.sh for the peer listener."
+            result["start"] = "Install complete; run bin/start-agent-bridge-peer.sh for the peer listener."
     return result
 
 
 def doctor() -> dict:
-    home, root = hermes_home(), bridge_root()
+    home, root = agent_bridge_home(), bridge_root()
     hermes = os.environ.get("HERMES_EXE") or shutil.which("hermes")
-    return {"platform": sys.platform, "python": sys.executable, "hermes_home": str(home), "bridge_root": str(root), "current_release": str(current_release(root) or ""), "hermes_executable": bool(hermes), "action": "Install Hermes separately or set HERMES_EXE." if not hermes else "ready"}
+    return {
+        "product": "Agent Bridge MCP",
+        "platform": sys.platform,
+        "python": sys.executable,
+        "agent_bridge_home": str(home),
+        "hermes_home": str(home),
+        "bridge_root": str(root),
+        "current_release": str(current_release(root) or ""),
+        "hermes_executable": bool(hermes),
+        "action": "Install an agent adapter or configure agents.json." if not hermes else "ready",
+    }
 
 
 def rollback() -> dict:
@@ -113,7 +142,7 @@ def rollback() -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Install or maintain the Hermes Bridge payload without touching pairing state.")
+    parser = argparse.ArgumentParser(description="Install or maintain Agent Bridge MCP without touching pairing state.")
     parser.add_argument("command", choices=("install", "update", "doctor", "rollback"))
     parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--start", action="store_true")

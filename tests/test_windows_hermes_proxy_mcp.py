@@ -236,6 +236,7 @@ def test_delegate_only_server_does_not_expose_messaging_tools():
     assert set(module.DEFAULT_PUBLIC_TOOLS).issubset(names)
     assert len(module.DEFAULT_PUBLIC_TOOLS) == 11
     assert set(module.NETWORK_EXTENSION_TOOLS).issubset(names)
+    assert set(module.UNIVERSAL_EXTENSION_TOOLS).issubset(names)
     assert "messages_send" not in names
     assert "conversations_list" not in names
     assert "bridge_agent_delegate_start" in names
@@ -268,6 +269,32 @@ def test_v127_core_tool_argument_contract_is_unchanged():
         "bridge_peer_delegate_cancel": {"peer_id", "task_id"},
     }
     for tool_name, properties in expected_properties.items():
+        assert set(schemas[tool_name].get("properties", {})) == properties
+
+    universal_properties = {
+        "bridge_agent_universal_list": set(),
+        "bridge_agent_universal_delegate_start": {
+            "agent",
+            "prompt",
+            "cwd",
+            "timeout_seconds",
+            "max_turns",
+            "conversation_key",
+            "hard_timeout_seconds",
+        },
+        "bridge_peer_universal_list": {"peer_id"},
+        "bridge_peer_universal_delegate_start": {
+            "peer_id",
+            "agent",
+            "prompt",
+            "cwd",
+            "timeout_seconds",
+            "max_turns",
+            "conversation_key",
+            "hard_timeout_seconds",
+        },
+    }
+    for tool_name, properties in universal_properties.items():
         assert set(schemas[tool_name].get("properties", {})) == properties
 
 
@@ -340,9 +367,9 @@ def test_bridge_agent_status_reports_bridge_version(monkeypatch):
 
     status = asyncio.run(call_status())
 
-    assert module.BRIDGE_VERSION == "v1.3.1"
+    assert module.BRIDGE_VERSION == "v1.3.5"
     assert module.MIN_COMPATIBLE_BRIDGE_VERSION == "v1.2.7"
-    assert status["bridge_version"] == "v1.3.1"
+    assert status["bridge_version"] == "v1.3.5"
     assert status["min_compatible_bridge_version"] == "v1.2.7"
     assert "Versions >= v1.2.7" in status["compatibility_policy"]
     assert status["hermes_version"] == "hermes-runtime"
@@ -729,3 +756,49 @@ def test_peer_success_includes_tool_family_metadata(monkeypatch):
     assert result["used_tool_family"] == "bridge_peer"
     assert result["remote_tool_called"] == "bridge_agent_status"
     assert result["peer_id"] == "quest3"
+
+
+def test_peer_universal_rejects_legacy_static_peer(monkeypatch):
+    module = load_proxy_module()
+    monkeypatch.setattr(module, "_load_peer_config", lambda: {
+        "legacy": {
+            "peer_id": "legacy",
+            "url": "http://192.168.0.72:18084/mcp",
+            "platform": "android",
+            "token": "secret",
+        }
+    })
+
+    result = module._peer_universal_call(
+        "legacy", "bridge_agent_universal_list", {}
+    )
+
+    assert result["error"] == "extension_unsupported"
+    assert "certificate-pinned" in result["message"]
+
+
+def test_peer_universal_normalizes_old_managed_peer_tool_error(monkeypatch):
+    module = load_proxy_module()
+    peer = {
+        "peer_id": "managed",
+        "url": "https://192.168.0.72:18443/mcp",
+        "platform": "windows",
+        "token": "secret",
+        "managed": True,
+        "cert_pem": "certificate",
+    }
+    monkeypatch.setattr(module, "_load_peer_config", lambda: {"managed": peer})
+    monkeypatch.setattr(
+        module,
+        "_peer_call",
+        lambda peer_id, tool_name, arguments: {
+            "error": "Tool not found: bridge_agent_universal_list"
+        },
+    )
+
+    result = module._peer_universal_call(
+        "managed", "bridge_agent_universal_list", {}
+    )
+
+    assert result["error"] == "extension_unsupported"
+    assert result["peer_id"] == "managed"

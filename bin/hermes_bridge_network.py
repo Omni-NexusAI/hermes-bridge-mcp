@@ -27,9 +27,16 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 
+for _key, _value in list(os.environ.items()):
+    if _key.startswith("AGENT_BRIDGE_"):
+        os.environ[f"HERMES_BRIDGE_{_key[len('AGENT_BRIDGE_'):]}"] = _value
+
+
 NETWORK_PROTOCOL_VERSION = "1"
 NETWORK_EXTENSION = "automatic_pairing_v1"
 PRODUCTION_MDNS_TYPE = "_hermes-bridge._tcp.local."
+CANONICAL_MDNS_TYPE = "_agent-bridge._tcp.local."
+PRODUCTION_MDNS_TYPES = (CANONICAL_MDNS_TYPE, PRODUCTION_MDNS_TYPE)
 PRODUCTION_PORTS = {18082, 18083, 18084, 18443}
 DEFAULT_SECURE_PORT = 18443
 DEFAULT_TAILSCALE_TAG = "tag:hermes-bridge"
@@ -513,6 +520,18 @@ class PairingState:
             if peer.get("inbound_token") and peer.get("status", "paired") == "paired"
         ]
 
+    def peer_id_for_inbound_token(self, token: str) -> Optional[str]:
+        """Resolve an authenticated bearer token without exposing it publicly."""
+        for peer_id, peer in self.snapshot()["peers"].items():
+            inbound = str(peer.get("inbound_token") or "")
+            if (
+                inbound
+                and peer.get("status", "paired") == "paired"
+                and secrets.compare_digest(str(token or ""), inbound)
+            ):
+                return str(peer_id)
+        return None
+
     @staticmethod
     def _cleanup_peer_data(data: dict[str, Any], peer_id: str, fingerprint: str) -> dict[str, int]:
         removed = {
@@ -735,7 +754,7 @@ class NetworkManager:
             "fingerprint": identity.fingerprint,
             "cert_pem": identity.cert_pem,
             "platform": platform.system().lower() or "unknown",
-            "bridge_version": os.environ.get("HERMES_BRIDGE_VERSION", "v1.3.0"),
+            "bridge_version": os.environ.get("HERMES_BRIDGE_VERSION", "v1.3.5"),
         }
         doc["signature"] = self.identities.sign(doc)
         return doc
@@ -1763,6 +1782,8 @@ class MdnsDiscovery:
         self.zeroconf = None
         self.browser = None
         self.info = None
+        self.browsers = []
+        self.infos = []
 
     def start(self) -> None:
         if os.environ.get("HERMES_BRIDGE_TEST_SANDBOX") == "1":
@@ -1780,20 +1801,22 @@ class MdnsDiscovery:
             "display_name": identity.display_name,
             "fingerprint": identity.fingerprint,
             "platform": platform.system().lower() or "unknown",
-            "bridge_version": os.environ.get("HERMES_BRIDGE_VERSION", "v1.3.0"),
+            "bridge_version": os.environ.get("HERMES_BRIDGE_VERSION", "v1.3.5"),
             "path": "/mcp",
         }
-        service_name = f"{identity.peer_id}.{PRODUCTION_MDNS_TYPE}"
-        self.info = ServiceInfo(
-            PRODUCTION_MDNS_TYPE,
-            service_name,
-            addresses=[socket.inet_aton(address)],
-            port=self.port,
-            properties=properties,
-            server=f"{identity.peer_id}.local.",
-        )
         self.zeroconf = Zeroconf()
-        self.zeroconf.register_service(self.info, allow_name_change=True)
+        for service_type in PRODUCTION_MDNS_TYPES:
+            info = ServiceInfo(
+                service_type,
+                f"{identity.peer_id}.{service_type}",
+                addresses=[socket.inet_aton(address)],
+                port=self.port,
+                properties=properties,
+                server=f"{identity.peer_id}.local.",
+            )
+            self.zeroconf.register_service(info, allow_name_change=True)
+            self.infos.append(info)
+        self.info = self.infos[0]
 
         manager = self.manager
 
@@ -1825,13 +1848,18 @@ class MdnsDiscovery:
             def remove_service(self, zc, service_type, name):
                 return
 
-        self.browser = ServiceBrowser(self.zeroconf, PRODUCTION_MDNS_TYPE, Listener())
+        listener = Listener()
+        self.browsers = [
+            ServiceBrowser(self.zeroconf, service_type, listener)
+            for service_type in PRODUCTION_MDNS_TYPES
+        ]
+        self.browser = self.browsers[0]
 
     def stop(self) -> None:
         if self.zeroconf:
-            if self.info:
+            for info in self.infos or ([self.info] if self.info else []):
                 with contextlib.suppress(Exception):
-                    self.zeroconf.unregister_service(self.info)
+                    self.zeroconf.unregister_service(info)
             self.zeroconf.close()
             self.zeroconf = None
 
@@ -1872,7 +1900,7 @@ def validate_sandbox_config(state_dir: Path, host: str, ports: list[int]) -> dic
 def runtime_plan(state_dir: Path, host: str, legacy_port: int, secure_port: int) -> dict[str, Any]:
     isolation = validate_sandbox_config(state_dir, host, [legacy_port, secure_port])
     return {
-        "bridge_version": "v1.3.0",
+        "bridge_version": "v1.3.5",
         "state_dir": str(Path(state_dir).resolve()),
         "identity_dir": str((Path(state_dir) / "network").resolve()),
         "host": host,
