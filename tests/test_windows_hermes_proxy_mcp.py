@@ -407,6 +407,36 @@ def test_peer_config_accepts_utf8_bom(tmp_path):
     assert peers["desktop"]["url"] == "http://192.168.0.2:18084/mcp"
 
 
+def test_managed_pair_overrides_colliding_legacy_peer(tmp_path, monkeypatch):
+    module = load_proxy_module()
+    config = tmp_path / "peers.json"
+    config.write_text(
+        '{"peers": [{"peer_id": "desktop", "url": "http://192.168.0.2:18084/mcp", "pair_key": "legacy"}]}',
+        encoding="utf-8",
+    )
+
+    class ManagedPeers:
+        def managed_peer_config(self):
+            return {
+                "desktop": {
+                    "peer_id": "desktop",
+                    "url": "https://192.168.0.2:18443/mcp",
+                    "managed": True,
+                }
+            }
+
+    monkeypatch.setattr(module, "_network_manager", lambda: ManagedPeers())
+
+    peers = module._load_peer_config(config)
+
+    assert peers["desktop"]["url"] == "http://192.168.0.2:18084/mcp"
+    # The no-path call is the runtime resolution path and merges managed state.
+    monkeypatch.setattr(module, "_peer_config_candidates", lambda path=None: [config])
+    peers = module._load_peer_config()
+    assert peers["desktop"]["url"] == "https://192.168.0.2:18443/mcp"
+    assert peers["desktop"]["managed"] is True
+
+
 def test_peer_config_prefers_pair_key_env(tmp_path, monkeypatch):
     module = load_proxy_module()
     config = tmp_path / "peers.json"

@@ -822,8 +822,11 @@ def _load_peer_config(path: Optional[Path] = None) -> dict[str, dict[str, Any]]:
         managed_peers = _network_manager().managed_peer_config()
     except Exception:
         managed_peers = {}
-    # Explicit legacy/static configuration remains authoritative on collisions.
-    return {**managed_peers, **static_peers}
+    # Legacy/static peers remain available until a peer is explicitly migrated.
+    # A managed pairing for the same id is that explicit migration and must take
+    # precedence; otherwise an old :18084 record can silently override the
+    # verified HTTPS endpoint selected during pairing.
+    return {**static_peers, **managed_peers}
 
 
 def _cleanup_peer_artifacts(peer_id: str, fingerprint: str, dry_run: bool = False) -> dict[str, Any]:
