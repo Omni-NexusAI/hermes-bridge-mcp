@@ -28,25 +28,47 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 
-def _hermes_home() -> Path:
-    explicit = os.environ.get("HERMES_BRIDGE_HOME") or os.environ.get("HERMES_HOME")
+for _key, _value in list(os.environ.items()):
+    if _key.startswith("AGENT_BRIDGE_"):
+        os.environ[f"HERMES_BRIDGE_{_key[len('AGENT_BRIDGE_'):]}"] = _value
+
+
+def _bridge_home() -> Path:
+    explicit = os.environ.get("AGENT_BRIDGE_HOME") or os.environ.get("HERMES_BRIDGE_HOME")
     if explicit:
         return Path(explicit).expanduser()
     if os.name == "nt":
-        return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "hermes"
-    return Path.home() / ".hermes"
+        local = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        canonical, legacy = local / "agent-bridge", local / "hermes"
+    else:
+        canonical, legacy = Path.home() / ".agent-bridge", Path.home() / ".hermes"
+    return legacy if (legacy / "bridge-state").exists() else canonical
 
 
 def _bridge_state_dir() -> Path:
-    return Path(os.environ.get("HERMES_BRIDGE_STATE_DIR", str(_hermes_home() / "bridge-state"))).expanduser()
+    return Path(
+        os.environ.get(
+            "AGENT_BRIDGE_STATE_DIR",
+            os.environ.get("HERMES_BRIDGE_STATE_DIR", str(_bridge_home() / "bridge-state")),
+        )
+    ).expanduser()
 
 
 def _peer_config_file() -> Path:
-    return Path(os.environ.get("HERMES_BRIDGE_PEERS_CONFIG", str(_bridge_state_dir() / "peers.json"))).expanduser()
+    return Path(
+        os.environ.get(
+            "AGENT_BRIDGE_PEERS_CONFIG",
+            os.environ.get("HERMES_BRIDGE_PEERS_CONFIG", str(_bridge_state_dir() / "peers.json")),
+        )
+    ).expanduser()
 
 
 def _local_peer_id() -> str:
-    return os.environ.get("HERMES_BRIDGE_PEER_ID") or f"{platform.node() or 'hermes'}-{platform.system().lower() or 'peer'}"
+    return (
+        os.environ.get("AGENT_BRIDGE_PEER_ID")
+        or os.environ.get("HERMES_BRIDGE_PEER_ID")
+        or f"{platform.node() or 'agent'}-{platform.system().lower() or 'peer'}"
+    )
 
 
 def _lan_ip() -> str:
@@ -93,7 +115,7 @@ def _json(data: dict) -> str:
 
 def _discovery_available() -> bool:
     """Check if the v1.3.0 network module is present."""
-    network_path = _hermes_home() / "bin" / "hermes_bridge_network.py"
+    network_path = _bridge_home() / "bin" / "hermes_bridge_network.py"
     return network_path.exists()
 
 

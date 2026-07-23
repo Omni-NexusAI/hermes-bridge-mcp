@@ -45,9 +45,9 @@ def configure(settings: dict, name: str, url: str, bearer_token: str = "") -> tu
     servers = parsed["mcpServers"]
     desired = {
         "description": (
-            "Hermes Bridge MCP: use bridge_agent_* and bridge_peer_* tools through "
-            "the normal MCP interface. Do not use messenger gateway tools or raw "
-            "HTTP clients except for diagnostics."
+            "Agent Bridge MCP: use bridge_agent_*, bridge_peer_*, and universal "
+            "agent tools through the normal MCP interface. Hermes-era names remain "
+            "compatibility aliases. Do not use messenger gateway tools."
         ),
         "type": "streamable-http",
         "url": url,
@@ -84,11 +84,11 @@ def check_health(url: str, timeout: float = 5.0) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Add or update Hermes Bridge MCP in A0 settings.json.")
+    parser = argparse.ArgumentParser(description="Add or update Agent Bridge MCP in A0 settings.json.")
     parser.add_argument("--settings", default="/a0/usr/settings.json", help="Path to A0 settings.json")
-    parser.add_argument("--name", default="hermes-bridge", help="A0 MCP server name")
-    parser.add_argument("--url", default=DEFAULT_URL, help="Hermes Bridge MCP URL")
-    parser.add_argument("--health-url", default=DEFAULT_HEALTH_URL, help="Hermes Bridge health endpoint")
+    parser.add_argument("--name", default="agent-bridge", help="A0 MCP server name")
+    parser.add_argument("--url", default=DEFAULT_URL, help="Agent Bridge MCP URL")
+    parser.add_argument("--health-url", default=DEFAULT_HEALTH_URL, help="Agent Bridge health endpoint")
     parser.add_argument("--check-health", action="store_true", help="Check the bridge health endpoint after configuring")
     parser.add_argument("--token-file", help="File containing the local bridge bearer token")
     parser.add_argument("--dry-run", action="store_true", help="Print the resulting settings without writing")
@@ -96,7 +96,13 @@ def main() -> int:
 
     settings_path = Path(args.settings)
     settings = load_settings(settings_path)
-    token_path = Path(args.token_file) if args.token_file else Path(os.environ.get("LOCALAPPDATA", "")) / "hermes" / "bridge-state" / "local-mcp-token"
+    if args.token_file:
+        token_path = Path(args.token_file)
+    else:
+        local = Path(os.environ.get("LOCALAPPDATA", ""))
+        canonical = local / "agent-bridge" / "bridge-state" / "local-mcp-token"
+        legacy = local / "hermes" / "bridge-state" / "local-mcp-token"
+        token_path = legacy if legacy.is_file() else canonical
     bearer_token = token_path.read_text(encoding="utf-8").strip() if token_path.is_file() else ""
     updated, changed = configure(settings, args.name, args.url, bearer_token)
 
@@ -130,7 +136,7 @@ def main() -> int:
     result["backup"] = str(backup_path)
     result["verify_in_ui"] = (
         "Restart A0, then verify Settings > MCP/A2A > External MCP Servers > "
-        "Open; look for hermes-bridge in JSON and hermes_bridge in server status."
+        "Open; look for agent-bridge in JSON and agent_bridge in server status."
     )
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0

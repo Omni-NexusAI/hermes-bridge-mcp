@@ -1,6 +1,6 @@
 # Android / Quest Hermes Peer Bridge Setup
 
-Target Hermes Bridge MCP version: `v1.3.0`.
+Target Agent Bridge MCP version: `v1.3.5`.
 
 This setup is for Android-compatible Hermes peers, with Quest 3 as the first
 test device. It runs the bridge directly with the Python MCP SDK and does not

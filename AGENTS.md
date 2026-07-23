@@ -5,6 +5,8 @@
 - `AGENTS.md` files are binding work contracts for their subtrees.
 - Read the full applicable chain before editing and update it after meaningful contract or structure changes.
 - Preserve the stable v1.2.7 `bridge_agent_*` and `bridge_peer_*` core tool contract unless a breaking version is explicitly declared.
+- Agent Bridge MCP v1.3.5 adds four `universal_agent_v1` extension tools;
+  keep them separate from the exact 11-tool compatibility contract.
 - Pairing MCP Prompts are optional discovery conveniences; pairing tools remain
   authoritative and compatibility commands remain available for clients that
   do not expose MCP Prompts.
@@ -29,6 +31,8 @@
 
 - Run tests only with the repository's sandbox guard enabled.
 - Confirm the original 11 core tool names and schemas remain stable.
+- Verify host-owned CLI, MCP mapping, native MCP, and Codex session variants
+  without invoking a real installed agent.
 - Run `python -m pytest -q` from an isolated environment when dependencies are available.
 
 ## User Preferences

@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "agents": [
+    {
+      "id": "a0",
+      "display_name": "A0",
+      "kind": "native_mcp",
+      "command": ["python", "-m", "a0_bridge_adapter"],
+      "poll_interval": 1,
+      "capabilities": {
+        "contract": "universal_agent_v1",
+        "persistent_conversations": true,
+        "cancel": true
+      }
+    },
+    {
+      "id": "example-cli",
+      "display_name": "Example CLI agent",
+      "kind": "cli",
+      "enabled": false,
+      "command": ["example-agent", "run", "--prompt", "{prompt}"],
+      "resume_args": ["--resume", "{session_id}"],
+      "session_regex": "session_id:\\s*([A-Za-z0-9_.:-]+)",
+      "secret_env": ["EXAMPLE_AGENT_TOKEN"]
+    },
+    {
+      "id": "example-mcp",
+      "display_name": "Example mapped MCP agent",
+      "kind": "mcp_http",
+      "enabled": false,
+      "url": "http://127.0.0.1:19000/mcp",
+      "mode": "synchronous",
+      "tools": {
+        "start": "agent_run",
+        "continue": "agent_continue"
+      },
+      "fields": {
+        "prompt": "prompt",
+        "cwd": "cwd",
+        "session_input_candidates": ["conversationId"],
+        "session_output_candidates": ["conversationId"]
+      }
+    }
+  ]
+}

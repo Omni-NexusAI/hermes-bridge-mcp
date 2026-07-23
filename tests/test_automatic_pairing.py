@@ -321,7 +321,7 @@ def test_two_sandboxed_https_peers_pair_delegate_recover_and_rekey(tmp_path):
         assert manager_b.state.peer("sandbox-a") is not None
 
         reverse = asyncio.run(_remote_tool(manager_b.state.peer("sandbox-a"), "bridge_agent_status", {}))
-        assert reverse["bridge_version"] == "v1.3.1"
+        assert reverse["bridge_version"] == "v1.3.5"
 
         preview = manager_a.unpair("sandbox-b", identity_b.fingerprint, dry_run=True)
         assert preview["status"] == "preview"
