@@ -67,7 +67,7 @@ def _generate_token() -> str:
 
 def _read_peers(path: Path) -> dict:
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8-sig")
         data = json.loads(raw)
         if isinstance(data, dict) and "peers" in data:
             return data

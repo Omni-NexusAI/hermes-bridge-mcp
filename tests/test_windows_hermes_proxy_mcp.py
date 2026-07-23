@@ -394,6 +394,19 @@ def test_peer_config_loads_static_peers_and_token_env(tmp_path, monkeypatch):
     assert peers["quest3"]["token"] == "secret"
 
 
+def test_peer_config_accepts_utf8_bom(tmp_path):
+    module = load_proxy_module()
+    config = tmp_path / "peers.json"
+    config.write_text(
+        '{"peers": [{"peer_id": "desktop", "url": "http://192.168.0.2:18084/mcp", "pair_key": "test"}]}',
+        encoding="utf-8-sig",
+    )
+
+    peers = module._parse_peer_config(config)
+
+    assert peers["desktop"]["url"] == "http://192.168.0.2:18084/mcp"
+
+
 def test_peer_config_prefers_pair_key_env(tmp_path, monkeypatch):
     module = load_proxy_module()
     config = tmp_path / "peers.json"

@@ -761,7 +761,9 @@ def _peer_config_candidates(path: Optional[Path] = None, os_name: Optional[str] 
 
 def _parse_peer_config(config_path: Path) -> dict[str, dict[str, Any]]:
     try:
-        raw = config_path.read_text(encoding="utf-8")
+        # Windows PowerShell 5.1 commonly writes UTF-8 JSON with a BOM.
+        # Accept that interoperable form without weakening JSON validation.
+        raw = config_path.read_text(encoding="utf-8-sig")
         data = json.loads(raw)
     except Exception as exc:
         raise ValueError(f"failed to load peer config {config_path}: {exc}") from exc
@@ -839,7 +841,7 @@ def _cleanup_peer_artifacts(peer_id: str, fingerprint: str, dry_run: bool = Fals
     }
     if PEER_CONFIG_FILE.exists():
         try:
-            raw = json.loads(PEER_CONFIG_FILE.read_text(encoding="utf-8"))
+            raw = json.loads(PEER_CONFIG_FILE.read_text(encoding="utf-8-sig"))
             peers_raw = raw.get("peers", raw) if isinstance(raw, dict) else raw
             if isinstance(peers_raw, list):
                 retained = [
