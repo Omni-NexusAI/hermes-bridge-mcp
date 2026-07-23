@@ -1,26 +1,29 @@
 ---
 name: agent-bridge-pairing
-description: "Pair bridge-enabled agents via slash commands: manual, discovery, or Tailscale."
-version: 1.0.0
+description: "Pair bridge-enabled agents via MCP Prompts: manual, discovery, or Tailscale."
+version: 1.0.1
 author: Hermes Agent
 license: MIT
 platforms: [windows, linux, macos, android]
 metadata:
   hermes:
     category: infrastructure
-    tags: [bridge, pairing, networking, mcp, discovery, tailscale, mesh]
+    tags: [bridge, pairing, networking, mcp, discovery, tailscale, mesh, prompts]
     related_skills: [hermes-bridge-mcp, hermes-mesh-network-protocol]
 ---
 
 # Agent Bridge Pairing Skill
 
-Streamlines cross-device agent pairing into slash-command workflows. Three
+Streamlines cross-device agent pairing into native MCP Prompt workflows. Three
 modes cover every scenario: manual (known IP), discovery (mDNS auto-find),
 and Tailscale (cross-subnet). Eliminates the repetitive back-and-forth of
 token generation, peers.json editing, and bidirectional verification.
 
-**Design goal:** the user types one command, the agent handles the rest —
-token generation, config writes on both sides, and connectivity verification.
+**Design goal:** the user invokes one prompt and the agent handles discovery,
+fingerprint verification, pairing, and connectivity checks. Clients that expose
+MCP Prompts receive these workflows directly from the server. The compatibility
+registration script remains available for clients that expose MCP tools but not
+MCP Prompts.
 
 ## When to Use
 

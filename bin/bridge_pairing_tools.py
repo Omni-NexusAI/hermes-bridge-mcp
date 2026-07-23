@@ -446,3 +446,89 @@ def add_pairing_tools(mcp, network_manager=None) -> None:
                 + " for the native TOFU pairing flow."
             ),
         })
+
+    prompt_decorator = getattr(mcp, "prompt", None)
+    if not callable(prompt_decorator):
+        return
+
+    @mcp.prompt()
+    def manual_pair(
+        peer_id: str,
+        url: str,
+        expected_fingerprint: str = "",
+    ) -> str:
+        """Pair with a device by secure URL and verified identity fingerprint."""
+        arguments = {
+            "peer_id": peer_id,
+            "url": url,
+            "expected_fingerprint": expected_fingerprint or None,
+        }
+        return (
+            "Use the Agent Bridge pairing tools to pair this exact device. "
+            "Call bridge_manual_pair with these arguments:\n"
+            f"{json.dumps(arguments, indent=2)}\n\n"
+            "If the result is confirmation_required, show the complete remote "
+            "fingerprint to the user and do not approve until they verify it. "
+            "Never shorten or infer a fingerprint."
+        )
+
+    @mcp.prompt()
+    def discovery_pair(
+        peer_id: str = "",
+        expected_fingerprint: str = "",
+    ) -> str:
+        """Discover devices, then pair one using its complete verified fingerprint."""
+        if not peer_id:
+            return (
+                "Call bridge_discovery_scan, list every untrusted candidate with "
+                "its complete fingerprint, and ask the user which exact identity "
+                "to approve. Do not approve a candidate automatically."
+            )
+        arguments = {
+            "peer_id": peer_id,
+            "expected_fingerprint": expected_fingerprint or None,
+        }
+        return (
+            "Call bridge_discovery_pair with these arguments:\n"
+            f"{json.dumps(arguments, indent=2)}\n\n"
+            "If expected_fingerprint is empty, stop and ask the user to verify "
+            "the complete candidate fingerprint before approval."
+        )
+
+    @mcp.prompt()
+    def tailscale_pair(
+        peer_id: str = "",
+        expected_fingerprint: str = "",
+    ) -> str:
+        """Discover and pair through a host-configured Tailscale backend."""
+        return (
+            "First call bridge_pair_status and confirm the host configured "
+            "HERMES_BRIDGE_DISCOVERY_BACKEND=tailscale. Do not modify host "
+            "network or credential settings. Then follow the discovery pairing "
+            "flow"
+            + (
+                f" for peer {json.dumps(peer_id)} with expected fingerprint "
+                f"{json.dumps(expected_fingerprint)}."
+                if peer_id
+                else " and ask the user which complete fingerprint to approve."
+            )
+        )
+
+    @mcp.prompt()
+    def pair_status() -> str:
+        """Show sanitized pairing, discovery, and connectivity status."""
+        return (
+            "Call bridge_pair_status. Summarize configured and managed peers, "
+            "discovery health, and any recommended recovery action without "
+            "displaying bearer tokens, private keys, or pairing credentials."
+        )
+
+    @mcp.prompt()
+    def repair(peer_id: str) -> str:
+        """Diagnose and repair one identified peer connection."""
+        return (
+            "Call bridge_repair_peer with this peer_id:\n"
+            f"{json.dumps(peer_id)}\n\n"
+            "Report the failed stage and the smallest safe corrective action. "
+            "Do not replace a pinned fingerprint or forget a peer automatically."
+        )
