@@ -71,7 +71,9 @@ function Get-BridgeProcessCandidates {
         }
     }
     $candidates += @{ release = $BridgeHome; python = (Join-Path $LegacyHome "hermes-agent\venv\Scripts\python.exe") }
-    return @($candidates | Sort-Object release, python -Unique)
+    # Windows PowerShell 5.1 does not reliably sort hashtable keys as properties.
+    # Materialize objects before deduplication so distinct interpreter pairs survive.
+    return @($candidates | ForEach-Object { [pscustomobject]$_ } | Sort-Object release, python -Unique)
 }
 
 function Get-OwnedBridgeProcess([int]$ProcessId) {
