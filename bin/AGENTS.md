@@ -62,7 +62,8 @@ Runtime code and launchers for local delegation, peer networking, discovery, pai
 - Ownership inspection covers retained content-addressed releases, not just the
   single rollback pointer. A later update may otherwise strand a verified old
   listener after `current.json` advances again; each candidate still requires its
-  exact managed script and interpreter, and junctions are ignored.
+  exact managed script and interpreter. Retained pre-content-addressed payloads
+  may use the managed shared venv; junctions are ignored.
 - `hermes_bridge_network.py` owns device identity, managed peer state, durable revocations, mDNS, pairing HTTP routes, pinned TLS, signed introductions, and recovery.
 - Managed secrets live only in restricted `bridge-state/network` files; public MCP status must expose booleans and fingerprints, never credentials.
 - Pairing and rekey routes accept only bounded requests from loopback, private, link-local, or official Tailscale source ranges; Tailscale ranges require the Tailscale backend.

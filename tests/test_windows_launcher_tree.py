@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.mark.parametrize("scenario", [
     "ready_child", "ready_busy", "inspection_denied", "listener_inventory_denied",
-    "restart", "delayed_restart", "historical_release", "autoexit", "unknown_child", "unknown_descendant",
+    "restart", "delayed_restart", "historical_release", "historical_shared_runtime", "autoexit", "unknown_child", "unknown_descendant",
     "wrong_base", "wrong_script", "older_child", "reused_child", "reused_root", "foreign_listener",
 ])
 def test_redirector_tree_ownership_and_restart(tmp_path, scenario):
@@ -30,6 +30,7 @@ $LegacyHome = Join-Path $BridgeHome 'legacy'; $PythonExe = Join-Path $BridgeHome
 $BridgeScript = Join-Path $Release 'bin\agent-bridge-mcp.py'; $BuildRevision = 'candidate'
 $base = Join-Path $BridgeHome 'base\python.exe'; $scenario = $args[2]
 New-Item -ItemType Directory -Force (Split-Path $PythonExe -Parent) | Out-Null
+New-Item -ItemType File -Force $PythonExe | Out-Null
 ('base-executable = ' + $base) | Set-Content (Join-Path $BridgeHome 'venv\pyvenv.cfg')
 function Make-Process($number, $parent, $exe, $birth, $command) {
     [pscustomobject]@{ProcessId=$number;ParentProcessId=$parent;ExecutablePath=$exe;CreationDate=$birth;CommandLine=$command}
@@ -83,13 +84,20 @@ if ($scenario -in @('inspection_denied','listener_inventory_denied')) {
     if (-not $rejected -or $script:stopped.Count -or $script:started) { throw 'inspection failure caused a process mutation' }
     exit 0
 }
-if ($scenario -eq 'historical_release') {
+if ($scenario -in @('historical_release','historical_shared_runtime')) {
     $oldRelease = Join-Path $RuntimeRoot 'releases\old-payload'; $oldPython = Join-Path $RuntimeRoot 'environments\old-payload\Scripts\python.exe'
     New-Item -ItemType Directory -Force (Join-Path $oldRelease 'bin'), (Split-Path $oldPython -Parent) | Out-Null
     New-Item -ItemType File -Force (Join-Path $oldRelease 'bin\agent-bridge-mcp.py'), $oldPython | Out-Null
     ('base-executable = ' + $base) | Set-Content (Join-Path $RuntimeRoot 'environments\old-payload\pyvenv.cfg')
-    $oldCommand = '"' + $oldPython + '" "' + (Join-Path $oldRelease 'bin\agent-bridge-mcp.py') + '" --port 49123'
-    $script:rows[0] = Make-Process 200 100 $oldPython 10 $oldCommand
+    $sharedPython = Join-Path $RuntimeRoot 'venv\Scripts\python.exe'
+    if ($scenario -eq 'historical_shared_runtime') {
+        New-Item -ItemType Directory -Force (Split-Path $sharedPython -Parent) | Out-Null
+        New-Item -ItemType File -Force $sharedPython | Out-Null
+        ('base-executable = ' + $base) | Set-Content (Join-Path $RuntimeRoot 'venv\pyvenv.cfg')
+    }
+    $oldInterpreter = if ($scenario -eq 'historical_shared_runtime') { $sharedPython } else { $oldPython }
+    $oldCommand = '"' + $oldInterpreter + '" "' + (Join-Path $oldRelease 'bin\agent-bridge-mcp.py') + '" --port 49123'
+    $script:rows[0] = Make-Process 200 100 $oldInterpreter 10 $oldCommand
     $script:rows[1] = Make-Process 201 200 $base 11 $oldCommand
 }
 if ($scenario -in @('ready_child','ready_busy')) {
@@ -111,7 +119,7 @@ switch ($scenario) {
     'reused_root' { $script:rows[0] = Make-Process 200 100 $PythonExe 20 $command }
     'foreign_listener' { $script:listener = 999 }
 }
-if ($scenario -in @('restart','delayed_restart','historical_release','autoexit')) {
+if ($scenario -in @('restart','delayed_restart','historical_release','historical_shared_runtime','autoexit')) {
     Stop-OwnedBridgeTree $tree 49123
     $expected = if ($scenario -eq 'autoexit') {'201'} else {'201,200'}
     if (($script:stopped -join ',') -ne $expected) { throw ('wrong termination order: ' + ($script:stopped -join ',')) }

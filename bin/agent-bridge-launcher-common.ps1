@@ -57,10 +57,16 @@ function Get-BridgeProcessCandidates {
             if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
             $candidateRelease = $entry.FullName
             $candidatePython = Join-Path $environmentRoot (Join-Path $entry.Name 'Scripts\python.exe')
+            $sharedRuntimePython = Join-Path $RuntimeRoot 'venv\Scripts\python.exe'
             $candidateScript = Join-Path $candidateRelease 'bin\agent-bridge-mcp.py'
             $legacyScript = Join-Path $candidateRelease 'bin\windows-hermes-proxy-mcp.py'
-            if ((Test-Path -LiteralPath $candidatePython) -and ((Test-Path -LiteralPath $candidateScript) -or (Test-Path -LiteralPath $legacyScript))) {
-                $candidates += @{ release = $candidateRelease; python = $candidatePython }
+            if ((Test-Path -LiteralPath $candidateScript) -or (Test-Path -LiteralPath $legacyScript)) {
+                # Pre-content-addressed installations retained one managed shared
+                # venv. Keep it eligible only for a script inside this managed
+                # release root, so a later update can converge that listener too.
+                foreach ($interpreter in @($candidatePython, $sharedRuntimePython)) {
+                    if (Test-Path -LiteralPath $interpreter) { $candidates += @{ release = $candidateRelease; python = $interpreter } }
+                }
             }
         }
     }
