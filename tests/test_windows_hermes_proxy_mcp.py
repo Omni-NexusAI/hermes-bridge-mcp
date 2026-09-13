@@ -325,7 +325,10 @@ def test_server_instructions_explain_routing_rule():
 
     instructions = server._mcp_server.instructions
 
-    assert "Use bridge_agent_* only for the local Hermes agent" in instructions
+    assert "destination machine and requested framework separately" in instructions
+    assert "always target Hermes" in instructions
+    assert "bridge_agent_universal_list or bridge_peer_universal_list" in instructions
+    assert "Never substitute Hermes" in instructions
     assert "Never use bridge_agent_* to reach another machine" in instructions
     assert "Use bridge_peer_* with peer_id" in instructions
     assert "call bridge_agent_status first" in instructions
@@ -384,7 +387,9 @@ def test_bridge_agent_status_reports_bridge_version(monkeypatch):
     assert "token" not in status["peers"][0]
     assert status["tool_routing"]["local_tools"] == "bridge_agent_*"
     assert status["tool_routing"]["network_peer_tools"] == "bridge_peer_*"
-    assert "Use bridge_agent_* only for the local Hermes agent" in status["tool_routing"]["rule"]
+    assert "requested machine and framework separately" in status["tool_routing"]["rule"]
+    assert "Legacy delegate tools always target Hermes" in status["tool_routing"]["rule"]
+    assert "Never fall back to Hermes" in status["tool_routing"]["rule"]
     assert status["public_tool_contract"]["default_tool_count"] == 11
     assert status["public_tool_contract"]["default_tools"] == list(module.DEFAULT_PUBLIC_TOOLS)
     assert status["public_tool_contract"]["stable_since"] == "v1.2.7"

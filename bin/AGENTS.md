@@ -21,6 +21,13 @@ Runtime code and launchers for local delegation, peer networking, discovery, pai
 - Universal routing is host-configured through `universal_agent_v1`. Remote
   callers may select only enabled agent IDs and may not supply executables,
   credentials, sandbox escalation, or unrestricted execution policy.
+- Codex receiving is retired from normal bridge use. Default-disable its built-in
+  adapter and hide the eight unfinished Desktop owner-routing tools; preserve
+  lossless result tools and stored history. Experimental opt-in flags are explicit
+  host choices, never evidence of Desktop attachment. Codex remains an MCP caller
+  for Hermes and other frameworks; do not uninstall its entire bridge entry.
+- Framework selection must use the requested device's advertised agent ID.
+  Unknown, disabled, or unsupported frameworks must not fall back to Hermes.
 - Peer universal tools require managed, authenticated, certificate-pinned
   peers. Capabilities must never be exposed in public discovery metadata.
 - A new device identity always requires user approval. Known pinned identities may reconnect or rekey automatically.
@@ -41,8 +48,9 @@ Runtime code and launchers for local delegation, peer networking, discovery, pai
   or the current noninteractive `codex exec` lifecycle. Never treat the
   client-only `codex mcp` management command as a stdio server. Exec sessions
   are bridge-managed work and do not prove access to Desktop-owned conversations;
-  use the configured app-server owner path for that capability.
-- Routed queue inputs are private bridge state. Startup and result polling may
+  owner attachment remains an unfinished experiment behind explicit host opt-in.
+- Routed queue inputs are private bridge state. With experimental routing enabled,
+  startup and result polling may
   resume known unsent queues with the same request ID; uncertain or acknowledged
   deliveries only reconcile. Cancellation preserves already accepted owner work.
 - Conversation extensions accept local callers or authenticated managed peers;

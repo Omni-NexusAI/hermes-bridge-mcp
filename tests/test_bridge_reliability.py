@@ -117,6 +117,7 @@ def test_complete_result_pages_rebuild_original_reply(tmp_path, monkeypatch):
 
 
 def test_peer_route_requires_advertised_extension(monkeypatch):
+    monkeypatch.setenv("AGENT_BRIDGE_ENABLE_CODEX_OWNER_ROUTING", "1")
     module = load_proxy_module()
     monkeypatch.setattr(module, "_get_peer", lambda peer: ({"managed": True, "cert_pem": "synthetic"}, None))
     calls = []
@@ -155,7 +156,8 @@ def test_foreign_live_owner_is_not_marked_interrupted(tmp_path, monkeypatch):
         assert module._task_status("live")["status"] == "running"
 
 
-def test_legacy_token_cannot_use_conversation_extensions():
+def test_legacy_token_cannot_use_conversation_extensions(monkeypatch):
+    monkeypatch.setenv("AGENT_BRIDGE_ENABLE_CODEX_OWNER_ROUTING", "1")
     module = load_proxy_module()
     tools = _tools(module)
     token = module._CONVERSATION_ACCESS_CONTEXT.set(False)
