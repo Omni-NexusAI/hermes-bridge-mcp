@@ -37,6 +37,11 @@ Runtime code and launchers for local delegation, peer networking, discovery, pai
   Reuse caller/agent/project/topic associations and actual conversation context.
   Queue ordinary contributions; guarded steering must not wait behind polling locks.
   Validate project association before delivery and retrieve the acknowledged turn.
+- The built-in Codex adapter may use a historical explicit `mcp-server` command
+  or the current noninteractive `codex exec` lifecycle. Never treat the
+  client-only `codex mcp` management command as a stdio server. Exec sessions
+  are bridge-managed work and do not prove access to Desktop-owned conversations;
+  use the configured app-server owner path for that capability.
 - Routed queue inputs are private bridge state. Startup and result polling may
   resume known unsent queues with the same request ID; uncertain or acknowledged
   deliveries only reconcile. Cancellation preserves already accepted owner work.

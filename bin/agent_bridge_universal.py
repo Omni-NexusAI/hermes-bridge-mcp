@@ -188,27 +188,44 @@ class UniversalAgentRegistry:
                 "builtin": True,
             }
         help_text = self.command_probe([str(executable), "--help"])
-        subcommand = "mcp-server" if "mcp-server" in help_text else "mcp"
+        # `codex mcp` manages *client* registrations on current CLI releases;
+        # it is not an MCP stdio server and fails when launched through an MCP
+        # transport. Only an explicit historical `mcp-server` command may use
+        # the stdio adapter. Modern Codex uses its documented noninteractive
+        # exec lifecycle for bridge-managed work; Desktop-owned conversation
+        # routing remains the separate app-server owner integration.
+        if "mcp-server" in help_text:
+            return {
+                "id": "codex", "display_name": "Codex", "kind": "mcp_stdio",
+                "enabled": True, "available": True, "builtin": True,
+                "command": [str(executable), "mcp-server"], "mode": "synchronous",
+                "tools": {"start": "codex", "continue": "codex-reply"},
+                "fields": {"prompt": "prompt", "cwd": "cwd",
+                           "session_input_candidates": ["threadId", "sessionId", "conversationId"],
+                           "session_output_candidates": ["threadId", "sessionId", "conversationId"]},
+                "capabilities": {"contract": "universal_agent_v1", "persistent_conversations": True,
+                                 "cancel": False, "desktop_conversation_owner": False},
+            }
+        if "exec" not in help_text:
+            return {
+                "id": "codex", "kind": "cli", "enabled": True, "available": False,
+                "reason": "Codex exposes no supported noninteractive exec or MCP server command",
+                "builtin": True,
+            }
         return {
             "id": "codex",
             "display_name": "Codex",
-            "kind": "mcp_stdio",
+            "kind": "cli",
             "enabled": True,
             "available": True,
             "builtin": True,
-            "command": [str(executable), subcommand],
-            "mode": "synchronous",
-            "tools": {"start": "codex", "continue": "codex-reply"},
-            "fields": {
-                "prompt": "prompt",
-                "cwd": "cwd",
-                "session_input_candidates": ["threadId", "sessionId", "conversationId"],
-                "session_output_candidates": ["threadId", "sessionId", "conversationId"],
-            },
+            "command": [str(executable), "exec", "--json", "--color", "never", "--skip-git-repo-check", "{prompt}"],
+            "resume_command": [str(executable), "exec", "resume", "{session_id}", "--json", "--skip-git-repo-check", "{prompt}"],
+            "session_regex": r'"thread_id"\s*:\s*"([^"]+)"',
             "capabilities": {
-                "contract": "universal_agent_v1",
                 "persistent_conversations": True,
                 "cancel": False,
+                "desktop_conversation_owner": False,
             },
         }
 
@@ -474,8 +491,11 @@ class UniversalAgentRegistry:
             "max_turns": max_turns,
             "session_id": session_id or "",
         }
-        command = _format_command(manifest["command"], values)
-        if session_id:
+        command = _format_command(
+            manifest.get("resume_command") if session_id and manifest.get("resume_command") else manifest["command"],
+            values,
+        )
+        if session_id and not manifest.get("resume_command"):
             command.extend(_format_command(manifest.get("resume_args", []), values))
         creationflags = 0
         startupinfo = None

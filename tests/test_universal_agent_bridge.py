@@ -44,10 +44,22 @@ def test_builtin_manifests_auto_detect_hermes_and_modern_codex(tmp_path, monkeyp
     assert registry.manifests()["codex"]["command"] == ["codex-test", "mcp-server"]
 
 
-def test_codex_legacy_mcp_subcommand_is_normalized(tmp_path, monkeypatch):
+def test_codex_client_only_mcp_subcommand_is_not_misclassified_as_a_server(tmp_path, monkeypatch):
     registry = _registry(tmp_path, monkeypatch, command_probe=lambda command: "commands: mcp")
 
-    assert registry.manifests()["codex"]["command"] == ["codex-test", "mcp"]
+    manifest = registry.manifests()["codex"]
+    assert manifest["available"] is False
+    assert "noninteractive exec or MCP server" in manifest["reason"]
+
+
+def test_codex_modern_exec_uses_cli_lifecycle_and_resume_template(tmp_path, monkeypatch):
+    registry = _registry(tmp_path, monkeypatch, command_probe=lambda command: "Commands: exec mcp app-server")
+
+    manifest = registry.manifests()["codex"]
+    assert manifest["kind"] == "cli"
+    assert manifest["command"][:3] == ["codex-test", "exec", "--json"]
+    assert manifest["resume_command"][:3] == ["codex-test", "exec", "resume"]
+    assert manifest["capabilities"]["desktop_conversation_owner"] is False
 
 
 def test_cli_adapter_uses_argument_arrays_without_shell_injection(tmp_path, monkeypatch):
