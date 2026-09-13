@@ -37,16 +37,35 @@ function Test-BridgeProcessOwnership($Process, [string]$ExpectedScript, [string]
 }
 
 function Get-BridgeProcessCandidates {
-    # Accept the selected release, its explicit rollback release, and installed
-    # compatibility wrappers. Never infer ownership from process name or PID alone.
+    # Accept installed content-addressed releases as well as the selected release
+    # and compatibility wrappers. An update may advance current.json twice while a
+    # verified peer listener is still draining an older retained payload; limiting
+    # ownership to one rollback generation strands that listener on its old venv.
+    # Every retained candidate must still match its exact script and interpreter;
+    # never infer ownership from a process name or PID alone.
     $candidates = @(@{ release = $Release; python = $PythonExe })
     $markerPath = Join-Path $RuntimeRoot "current.json"
     if (Test-Path $markerPath) {
         $marker = Get-Content $markerPath -Raw | ConvertFrom-Json
         if ($marker.previous) { $candidates += @{ release = $marker.previous; python = $(if ($marker.previous_python) { $marker.previous_python } else { Join-Path $RuntimeRoot "venv\Scripts\python.exe" }) } }
     }
+    $releaseRoot = Join-Path $RuntimeRoot 'releases'
+    $environmentRoot = Join-Path $RuntimeRoot 'environments'
+    if (Test-Path -LiteralPath $releaseRoot) {
+        foreach ($entry in @(Get-ChildItem -LiteralPath $releaseRoot -Directory -Force -ErrorAction Stop)) {
+            # Do not traverse a junction supplied outside the managed payload root.
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            $candidateRelease = $entry.FullName
+            $candidatePython = Join-Path $environmentRoot (Join-Path $entry.Name 'Scripts\python.exe')
+            $candidateScript = Join-Path $candidateRelease 'bin\agent-bridge-mcp.py'
+            $legacyScript = Join-Path $candidateRelease 'bin\windows-hermes-proxy-mcp.py'
+            if ((Test-Path -LiteralPath $candidatePython) -and ((Test-Path -LiteralPath $candidateScript) -or (Test-Path -LiteralPath $legacyScript))) {
+                $candidates += @{ release = $candidateRelease; python = $candidatePython }
+            }
+        }
+    }
     $candidates += @{ release = $BridgeHome; python = (Join-Path $LegacyHome "hermes-agent\venv\Scripts\python.exe") }
-    return $candidates
+    return @($candidates | Sort-Object release, python -Unique)
 }
 
 function Get-OwnedBridgeProcess([int]$ProcessId) {
