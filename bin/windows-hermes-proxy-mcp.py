@@ -179,6 +179,8 @@ _UNIVERSAL_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _CALLER_PEER_CONTEXT: contextvars.ContextVar[str] = contextvars.ContextVar(
     "agent_bridge_caller_peer", default="local"
 )
+_CONVERSATION_ACCESS_CONTEXT = contextvars.ContextVar("agent_bridge_conversation_access", default=True)
+_PROCESS_TOKEN = uuid.uuid4().hex
 
 import httpx  # noqa: E402
 from mcp import ClientSession  # noqa: E402
@@ -205,12 +207,24 @@ from hermes_bridge_network import (  # noqa: E402
     validate_sandbox_config,
 )
 from agent_bridge_universal import UniversalAdapterError, UniversalAgentRegistry  # noqa: E402
+from agent_bridge_storage import AtomicJsonStore, StorageError, conversation_lock, process_alive  # noqa: E402
+from agent_bridge_codex import CodexRoutingError  # noqa: E402
+from agent_bridge_conversations import ConversationRuntime, TOOLS as CONVERSATION_EXTENSION_TOOLS, add_conversation_tools  # noqa: E402
 
 os.environ.setdefault("AGENT_BRIDGE_VERSION", BRIDGE_VERSION)
 os.environ["HERMES_BRIDGE_VERSION"] = os.environ["AGENT_BRIDGE_VERSION"]
 
 _NETWORK_MANAGER: Optional[NetworkManager] = None
 _UNIVERSAL_REGISTRY: Optional[UniversalAgentRegistry] = None
+_CONVERSATION_RUNTIME = None
+
+
+def _conversation_runtime():
+    global _CONVERSATION_RUNTIME
+    if _CONVERSATION_RUNTIME is None:
+        _CONVERSATION_RUNTIME = ConversationRuntime(BRIDGE_STATE_DIR)
+        _CONVERSATION_RUNTIME.recover_pending()
+    return _CONVERSATION_RUNTIME
 
 
 def _network_manager() -> NetworkManager:
@@ -273,10 +287,13 @@ class _BearerTokenMiddleware:
         if scheme.lower() == "bearer" and token and any(secrets.compare_digest(token, item) for item in allowed):
             caller_peer = self.peer_resolver(token) if self.peer_resolver else None
             context_token = _CALLER_PEER_CONTEXT.set(caller_peer or "local")
+            client = scope.get("client") or ("", 0)
+            access_token = _CONVERSATION_ACCESS_CONTEXT.set(bool(caller_peer) or _is_loopback_host(client[0]))
             try:
                 await self.app(scope, receive, send)
             finally:
                 _CALLER_PEER_CONTEXT.reset(context_token)
+                _CONVERSATION_ACCESS_CONTEXT.reset(access_token)
             return
 
         await send({
@@ -291,6 +308,22 @@ class _BearerTokenMiddleware:
             "type": "http.response.body",
             "body": b"Unauthorized",
         })
+
+
+class _ConversationRequestContext:
+    """Every HTTP listener gates owner access, including legacy unauthenticated mode."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        client = scope.get("client") or ("", 0)
+        token = _CONVERSATION_ACCESS_CONTEXT.set(_is_loopback_host(client[0]))
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _CONVERSATION_ACCESS_CONTEXT.reset(token)
 
 
 class _HealthASGI:
@@ -311,6 +344,12 @@ class _HealthASGI:
                     status, body = 503, b'{"status":"not_ready"}'
                 else:
                     body = b'{"status":"ready"}'
+            if scope.get("path") == "/readyz":
+                payload = json.loads(body)
+                payload.update(bridge_version=BRIDGE_VERSION, process_id=os.getpid(),
+                    build_revision=os.environ.get("AGENT_BRIDGE_BUILD_REVISION",
+                        os.environ.get("HERMES_BRIDGE_BUILD_REVISION", "source")))
+                body = json.dumps(payload).encode("utf-8")
             await send({
                 "type": "http.response.start",
                 "status": status,
@@ -344,7 +383,7 @@ class _BearerOnlyFastMCP(FastMCP):
             )
         if self._bridge_network_manager:
             app = NetworkASGI(app, self._bridge_network_manager)
-        return _HealthASGI(app, readiness_check=lambda: BRIDGE_STATE_DIR.parent.exists())
+        return _HealthASGI(_ConversationRequestContext(app), readiness_check=lambda: BRIDGE_STATE_DIR.parent.exists())
 
 
 def _json(data: dict) -> str:
@@ -403,25 +442,19 @@ def _auth_tokens(auth_token: Optional[str] = None) -> list[str]:
 
 
 def _load_state() -> dict:
-    try:
-        raw = BRIDGE_STATE_FILE.read_text(encoding="utf-8")
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            data.setdefault("sessions", {})
-            data.setdefault("tasks", {})
-            return data
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
-    return {"sessions": {}, "tasks": {}}
+    return _state_store().read()
+
+
+def _state_store() -> AtomicJsonStore:
+    return AtomicJsonStore(BRIDGE_STATE_FILE, lambda: {"sessions": {}, "tasks": {}})
 
 
 def _save_state(data: dict) -> None:
-    BRIDGE_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = BRIDGE_STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(BRIDGE_STATE_FILE)
+    # Compatibility entry point for explicit snapshots; internal updates transact.
+    def replace(current):
+        current.clear()
+        current.update(data)
+    _state_store().mutate(replace)
 
 
 def _prune_old_tasks(data: dict) -> None:
@@ -438,17 +471,22 @@ def _public_task_record(record: dict) -> dict:
     public.pop("args", None)
     public.pop("prompt", None)
     public.pop("cwd_path", None)
+    public.pop("complete_result", None)
+    public.pop("owner_token", None)
+    public["stdout_truncated"] = len(str(public.get("stdout", ""))) > 8000
     public["stdout"] = _tail(str(public.get("stdout", "")))
     public["stderr_tail"] = _tail(str(public.get("stderr_tail", "")))
     return public
 
 
 def _persist_task(record: dict) -> None:
-    with _STATE_LOCK:
-        data = _load_state()
+    stored = dict(record)
+    for key in ("args", "prompt", "cwd_path"):
+        stored.pop(key, None)
+    def persist(data):
         _prune_old_tasks(data)
-        data.setdefault("tasks", {})[record["task_id"]] = _public_task_record(record)
-        _save_state(data)
+        data.setdefault("tasks", {})[record["task_id"]] = stored
+    _state_store().mutate(persist)
 
 
 def _session_record(a0_thread_key: str) -> Optional[dict]:
@@ -463,15 +501,14 @@ def _session_record(a0_thread_key: str) -> Optional[dict]:
 def _update_session_record(a0_thread_key: str, session_id: str, cwd: Optional[Path]) -> None:
     if not a0_thread_key or not session_id:
         return
-    with _STATE_LOCK:
-        data = _load_state()
+    def update(data):
         data.setdefault("sessions", {})[a0_thread_key] = {
             "session_id": session_id,
             "updated_at": _now(),
             "cwd": str(cwd) if cwd else "",
             "source": "mcp-agent-bridge",
         }
-        _save_state(data)
+    _state_store().mutate(update)
 
 
 def _derive_thread_key(cwd: Optional[Path], caller: Optional[str]) -> str:
@@ -529,6 +566,8 @@ def _result_tool_for_peer(peer_id: Optional[str]) -> str:
 
 
 def _next_action(status: str, peer_id: Optional[str], task_id: Optional[str]) -> str:
+    if status in {"interrupted", "delivery_uncertain", "reconciliation_required"}:
+        return "Reconcile the saved conversation and actual reply before submitting more work; the bridge will not rerun this delivery."
     if status in {"completed", "failed", "timed_out", "canceled"}:
         return f"Call {_result_tool_for_peer(peer_id)} with task_id {task_id} to retrieve the final delegated result."
     return f"Poll {_status_tool_for_peer(peer_id)} with task_id {task_id}; use {_result_tool_for_peer(peer_id)} when the task is terminal."
@@ -637,7 +676,7 @@ def _run_hidden(args: list[str], cwd: Optional[Path], timeout_seconds: int) -> d
         "exit_code": proc.returncode,
         "timed_out": timed_out,
         "elapsed_ms": elapsed_ms,
-        "stdout": _tail(stdout),
+        "stdout": stdout,
         "stderr_tail": _tail(stderr),
     }
 
@@ -771,7 +810,7 @@ def _complete_task(task_id: str, proc: subprocess.Popen, hard_timeout_seconds: i
             "elapsed_ms": int((finished - float(current["started_at"])) * 1000),
             "finished_at": finished,
             "updated_at": finished,
-            "stdout": _tail(stdout or ""),
+            "stdout": stdout or "",
             "stderr_tail": _tail(stderr or ""),
             "last_output_at": finished if (stdout or stderr) else current.get("last_output_at"),
             "session_id": session_id or current.get("resumed_session_id"),
@@ -779,20 +818,22 @@ def _complete_task(task_id: str, proc: subprocess.Popen, hard_timeout_seconds: i
         _TASKS[task_id] = current
         _PROCS.pop(task_id, None)
         public = _public_task_record(current)
-    _persist_task(public)
+    _persist_task(current)
 
 
 def _start_delegate_task(prepared: dict, hard_timeout_seconds: int, wait_timeout_seconds: Optional[int] = None) -> dict:
     task_id = uuid.uuid4().hex
-    proc = _start_hidden(prepared["args"], prepared["cwd"])
     started_at = _now()
     hard_timeout_i = max(1, min(int(hard_timeout_seconds), MAX_HARD_TIMEOUT_SECONDS))
     wait_timeout_i = int(wait_timeout_seconds or 0)
     task_shape = _estimate_task_shape(prepared["prompt"], int(prepared["max_turns"] or 90), wait_timeout_i or DEFAULT_INLINE_WAIT_SECONDS)
     record = {
         "task_id": task_id,
-        "status": "running",
-        "pid": proc.pid,
+        "status": "queued",
+        "caller_peer": _CALLER_PEER_CONTEXT.get(),
+        "owner_pid": os.getpid(),
+        "owner_token": _PROCESS_TOKEN,
+        "pid": None,
         "started_at": started_at,
         "updated_at": started_at,
         "last_checked_at": None,
@@ -822,11 +863,47 @@ def _start_delegate_task(prepared: dict, hard_timeout_seconds: int, wait_timeout
     }
     with _STATE_LOCK:
         _TASKS[task_id] = record
-        _PROCS[task_id] = proc
     _persist_task(record)
-    thread = threading.Thread(target=_complete_task, args=(task_id, proc, hard_timeout_i), daemon=True)
+    cancel_event = threading.Event()
+    thread = threading.Thread(target=_execute_legacy_task, args=(task_id, prepared, hard_timeout_i, cancel_event), daemon=True)
+    with _STATE_LOCK:
+        _UNIVERSAL_CANCEL_EVENTS[task_id] = cancel_event
+        _UNIVERSAL_THREADS[task_id] = thread
     thread.start()
     return _public_task_record(record)
+
+
+def _execute_legacy_task(task_id, prepared, hard_timeout, cancel_event):
+    record = _TASKS[task_id]
+    try:
+        with conversation_lock(BRIDGE_STATE_DIR, "hermes:" + prepared["a0_thread_key"], hard_timeout, cancel_event):
+            if cancel_event.is_set():
+                return
+            remaining = int(record["hard_deadline_at"] - _now())
+            if remaining <= 0:
+                raise StorageError("queue_timeout", "Deadline expired before delivery; no work was sent")
+            # Another local or peer process may have advanced this session while queued.
+            session = _session_record(prepared["a0_thread_key"])
+            session_id = session.get("session_id") if session else prepared.get("resumed_session_id")
+            args = _build_delegate_args(prepared["prompt"], prepared["max_turns"], session_id)
+            record.update(status="running", resumed_session_id=session_id, session_id=session_id)
+            _persist_task(record)  # Durable before subprocess delivery; restart never replays it.
+            proc = _start_hidden(args, prepared["cwd"])
+            with _STATE_LOCK:
+                record["pid"] = proc.pid
+                _PROCS[task_id] = proc
+            _persist_task(record)
+            if cancel_event.is_set():
+                _terminate_process_tree(proc)
+            _complete_task(task_id, proc, remaining)
+    except Exception as exc:
+        record.update(status="canceled" if cancel_event.is_set() else "failed", finished_at=_now(),
+                      error=getattr(exc, "code", "delegate_failed"), stderr_tail="Delegate could not complete; inspect the host runtime before retrying")
+        _persist_task(record)
+    finally:
+        with _STATE_LOCK:
+            _UNIVERSAL_THREADS.pop(task_id, None)
+            _UNIVERSAL_CANCEL_EVENTS.pop(task_id, None)
 
 
 def _complete_universal_task(
@@ -890,7 +967,8 @@ def _complete_universal_task(
             "elapsed_ms": int((finished - float(record["started_at"])) * 1000),
             "finished_at": finished,
             "updated_at": finished,
-            "stdout": _tail(str(result.get("stdout") or "")),
+            "stdout": str(result.get("stdout") or ""),
+            "complete_result": result,
             "stderr_tail": _tail(str(result.get("stderr_tail") or "")),
             "last_output_at": finished if result.get("stdout") or result.get("stderr_tail") else None,
             "session_id": result.get("session_id"),
@@ -902,7 +980,7 @@ def _complete_universal_task(
         _UNIVERSAL_THREADS.pop(task_id, None)
         _UNIVERSAL_CANCEL_EVENTS.pop(task_id, None)
         public = _public_task_record(record)
-    _persist_task(public)
+    _persist_task(record)
 
 
 def _start_universal_task(
@@ -974,6 +1052,8 @@ def _start_universal_task(
         "max_turns": max_turns_i,
         "agent": agent_id,
         "adapter_kind": selected.get("adapter_kind"),
+        "owner_pid": os.getpid(),
+        "owner_token": _PROCESS_TOKEN,
         "conversation_key": conversation,
         "caller_peer": _CALLER_PEER_CONTEXT.get(),
         "prompt": prompt.strip(),
@@ -1005,6 +1085,13 @@ def _start_universal_task(
 
 
 def _task_status(task_id: str) -> Optional[dict]:
+    if task_id.startswith("codex-"):
+        if not _CONVERSATION_ACCESS_CONTEXT.get():
+            return {"error": "managed_peer_required", "message": "Owner tasks require a paired peer identity or local host access"}
+        try:
+            return _conversation_runtime().preview(_conversation_runtime().result(_CALLER_PEER_CONTEXT.get(), task_id))
+        except (CodexRoutingError, StorageError) as exc:
+            return {"task_id": task_id, "error": exc.code, "message": str(exc)}
     with _STATE_LOCK:
         record = _TASKS.get(task_id)
     if record:
@@ -1017,7 +1104,22 @@ def _task_status(task_id: str) -> Optional[dict]:
         return public
     data = _load_state()
     saved = data.get("tasks", {}).get(task_id)
+    if isinstance(saved, dict) and saved.get("status") in {"running", "queued"}:
+        if process_alive(saved.get("owner_pid")) is False:
+            def reconcile(state):
+                current = state.get("tasks", {}).get(task_id)
+                if current and current.get("status") in {"running", "queued"} and current.get("owner_token") == saved.get("owner_token"):
+                    current.update(status="interrupted", error="owner_exited", updated_at=_now(),
+                                   reconciliation_required=True)
+                return current
+            saved = _state_store().mutate(reconcile)
     return _public_task_record(saved) if isinstance(saved, dict) else None
+
+
+def _complete_task_record(task_id: str):
+    # Disk contains complete content and is authoritative across bridge processes.
+    _task_status(task_id)
+    return _load_state().get("tasks", {}).get(task_id)
 
 
 def _peer_config_candidates(path: Optional[Path] = None, os_name: Optional[str] = None) -> list[Path]:
@@ -1150,8 +1252,7 @@ def _cleanup_peer_artifacts(peer_id: str, fingerprint: str, dry_run: bool = Fals
         except Exception as exc:
             result["legacy_peer_cleanup_error"] = f"{type(exc).__name__}: {exc}"
 
-    with _STATE_LOCK:
-        data = _load_state()
+    def cleanup_sessions(data):
         sessions = data.setdefault("sessions", {})
         matching_keys = [
             key for key in sessions
@@ -1161,7 +1262,10 @@ def _cleanup_peer_artifacts(peer_id: str, fingerprint: str, dry_run: bool = Fals
         if not dry_run and matching_keys:
             for key in matching_keys:
                 sessions.pop(key, None)
-            _save_state(data)
+    if dry_run:
+        cleanup_sessions(_load_state())
+    else:
+        _state_store().mutate(cleanup_sessions)
     try:
         result["universal_session_bindings"] = _universal_registry().forget_peer(
             peer_id, dry_run=dry_run
@@ -1377,6 +1481,19 @@ def _peer_universal_call(
     return result
 
 
+def _peer_conversation_call(peer_id, tool_name, arguments):
+    peer, error = _get_peer(peer_id)
+    if error:
+        return _peer_error_response(peer_id, error, peer)
+    if not peer.get("managed") or not peer.get("cert_pem"):
+        return {"error": "extension_unsupported", "message": "Conversation routing requires an authenticated, certificate-pinned managed peer"}
+    status = _peer_call(peer_id, "bridge_agent_status", {})
+    contract = status.get("remote", status).get("public_tool_contract", {})
+    if contract.get("conversation_routing_extension") != "conversation_routing_v1":
+        return {"error": "extension_unsupported", "message": "Peer has not advertised conversation_routing_v1", "peer_id": peer_id}
+    return _peer_call(peer_id, tool_name, arguments)
+
+
 def _peer_delegate_start(
     peer_id: str,
     prompt: str,
@@ -1410,8 +1527,10 @@ def add_bridge_tools(mcp):
 
         Direct delegation does not require Telegram or Hermes Gateway.
         """
-        hermes_version = _run_hidden([str(HERMES_EXE), "--version"], cwd=HERMES_AGENT, timeout_seconds=30)
-        config_path = _run_hidden([str(HERMES_EXE), "config", "path"], cwd=HERMES_AGENT, timeout_seconds=30)
+        hermes_version = config_path = {"error": "adapter_unavailable", "message": "Hermes is not installed; other enabled adapters remain available."}
+        if _delegate_runner_available():
+            hermes_version = _run_hidden([str(HERMES_EXE), "--version"], cwd=HERMES_AGENT, timeout_seconds=30)
+            config_path = _run_hidden([str(HERMES_EXE), "config", "path"], cwd=HERMES_AGENT, timeout_seconds=30)
         state = _load_state()
         peers = _peer_diagnostics()
         configured_peer_ids = [peer["peer_id"] for peer in peers if peer.get("peer_id")]
@@ -1455,10 +1574,12 @@ def add_bridge_tools(mcp):
             "public_tool_contract": {
                 "default_tool_count": len(DEFAULT_PUBLIC_TOOLS),
                 "default_tools": list(DEFAULT_PUBLIC_TOOLS),
-                "extension_tools": list(NETWORK_EXTENSION_TOOLS + UNIVERSAL_EXTENSION_TOOLS),
+                "extension_tools": list(NETWORK_EXTENSION_TOOLS + UNIVERSAL_EXTENSION_TOOLS + CONVERSATION_EXTENSION_TOOLS),
                 "automatic_pairing_extension": "automatic_pairing_v1",
                 "universal_agent_extension": "universal_agent_v1",
                 "universal_tools": list(UNIVERSAL_EXTENSION_TOOLS),
+                "conversation_routing_extension": "conversation_routing_v1",
+                "conversation_tools": list(CONVERSATION_EXTENSION_TOOLS),
                 "legacy_windows_tools_env": "HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS",
                 "stable_since": MIN_COMPATIBLE_BRIDGE_VERSION,
             },
@@ -1471,6 +1592,7 @@ def add_bridge_tools(mcp):
             "delegate_requires_telegram_gateway": False,
             "delegate_transport": "local hermes chat subprocess via Hermes Bridge",
             "universal_agents": _universal_registry().public_agents(),
+            "conversation_routing": _conversation_runtime().capabilities(),
             "tracked_a0_threads": len(state.get("sessions", {})),
             "tracked_tasks": len(state.get("tasks", {})),
             "hermes_version": hermes_version,
@@ -1581,6 +1703,8 @@ def add_bridge_tools(mcp):
         """Return final output for a delegation task, or latest guided status if still running."""
         if not isinstance(task_id, str) or not task_id.strip():
             return _json({"error": "task_id is required"})
+        if task_id.startswith("codex-"):
+            return _json(_task_status(task_id))
         status = _task_status(task_id.strip())
         if not status:
             return _json({"error": f"task not found: {task_id}"})
@@ -1594,6 +1718,13 @@ def add_bridge_tools(mcp):
         if not isinstance(task_id, str) or not task_id.strip():
             return _json({"error": "task_id is required"})
         task_id = task_id.strip()
+        if task_id.startswith("codex-"):
+            if not _CONVERSATION_ACCESS_CONTEXT.get():
+                return _json({"error": "managed_peer_required", "message": "Owner tasks require a paired peer identity or local host access"})
+            try:
+                return _json(_conversation_runtime().cancel(_CALLER_PEER_CONTEXT.get(), task_id))
+            except (CodexRoutingError, StorageError) as exc:
+                return _json({"error": exc.code, "message": str(exc)})
         proc = _PROCS.get(task_id)
         universal_cancel = _UNIVERSAL_CANCEL_EVENTS.get(task_id)
         status = _task_status(task_id)
@@ -1601,6 +1732,8 @@ def add_bridge_tools(mcp):
             return _json({"error": f"task not found: {task_id}"})
         if universal_cancel:
             universal_cancel.set()
+            if proc and proc.poll() is None:
+                _terminate_process_tree(proc)
             with _STATE_LOCK:
                 record = _TASKS.get(task_id, {})
                 record.update({
@@ -1892,6 +2025,9 @@ def add_bridge_tools(mcp):
                 hard_timeout_seconds,
             )
         )
+
+    add_conversation_tools(mcp, _conversation_runtime(), _CALLER_PEER_CONTEXT.get,
+                           _peer_conversation_call, _complete_task_record, _CONVERSATION_ACCESS_CONTEXT.get)
 
     # --- Pairing management tools (optional, architecture-agnostic) ---
     # Provides bridge_manual_pair, bridge_pair_status, bridge_repair_peer,

@@ -16,6 +16,17 @@ Automated verification for the bridge's compatibility, security, discovery, pair
 ## Verification
 
 - Assert the 11 stable core tool names and schemas separately from optional extension tools.
+- `stable_tool_schemas.json` freezes complete schemas for the eleven core and four
+  universal tools from baseline 7101286; compare exact schemas on every change.
+- Register tools before schema collection and assert independent expected names
+  and counts so an empty snapshot or unregistered server cannot pass vacuously.
+- Cover cross-process writes, conversation serialization, uncertain delivery recovery,
+  complete reply paging, owner authentication, partial identities and corrupt revocations.
+- Owner routing tests inject synthetic RPC clients. Cover differing host project paths,
+  context-based reuse, ambiguity, justified new conversations, busy queues, unsupported
+  steering, concurrent steering, request retries, and project drift before delivery.
+- Use a fresh workspace-local `--basetemp .pytest-tmp/<run>` on Windows to avoid
+  inherited temporary-directory ACL failures. Never reuse a live state directory.
 - Cover the four universal extension tools separately, including native MCP,
   declarative MCP and CLI adapters, unknown/disabled agents, malformed
   manifests, injection resistance, secret redaction, cancellation, timeouts,

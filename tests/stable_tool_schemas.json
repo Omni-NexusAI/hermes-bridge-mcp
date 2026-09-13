@@ -1,0 +1,475 @@
+{
+  "bridge_agent_delegate": {
+    "properties": {
+      "a0_thread_key": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "A0 Thread Key"
+      },
+      "caller": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Caller"
+      },
+      "cwd": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Cwd"
+      },
+      "hard_timeout_seconds": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Hard Timeout Seconds"
+      },
+      "kill_on_timeout": {
+        "default": false,
+        "title": "Kill On Timeout",
+        "type": "boolean"
+      },
+      "max_turns": {
+        "default": 90,
+        "title": "Max Turns",
+        "type": "integer"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "type": "string"
+      },
+      "timeout_seconds": {
+        "default": 900,
+        "title": "Timeout Seconds",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "prompt"
+    ],
+    "title": "bridge_agent_delegateArguments",
+    "type": "object"
+  },
+  "bridge_agent_delegate_cancel": {
+    "properties": {
+      "task_id": {
+        "title": "Task Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "task_id"
+    ],
+    "title": "bridge_agent_delegate_cancelArguments",
+    "type": "object"
+  },
+  "bridge_agent_delegate_result": {
+    "properties": {
+      "task_id": {
+        "title": "Task Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "task_id"
+    ],
+    "title": "bridge_agent_delegate_resultArguments",
+    "type": "object"
+  },
+  "bridge_agent_delegate_start": {
+    "properties": {
+      "a0_thread_key": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "A0 Thread Key"
+      },
+      "caller": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Caller"
+      },
+      "cwd": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Cwd"
+      },
+      "hard_timeout_seconds": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Hard Timeout Seconds"
+      },
+      "max_turns": {
+        "default": 90,
+        "title": "Max Turns",
+        "type": "integer"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "type": "string"
+      },
+      "timeout_seconds": {
+        "default": 3600,
+        "title": "Timeout Seconds",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "prompt"
+    ],
+    "title": "bridge_agent_delegate_startArguments",
+    "type": "object"
+  },
+  "bridge_agent_delegate_status": {
+    "properties": {
+      "task_id": {
+        "title": "Task Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "task_id"
+    ],
+    "title": "bridge_agent_delegate_statusArguments",
+    "type": "object"
+  },
+  "bridge_agent_status": {
+    "properties": {},
+    "title": "bridge_agent_statusArguments",
+    "type": "object"
+  },
+  "bridge_agent_universal_delegate_start": {
+    "properties": {
+      "agent": {
+        "title": "Agent",
+        "type": "string"
+      },
+      "conversation_key": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Conversation Key"
+      },
+      "cwd": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Cwd"
+      },
+      "hard_timeout_seconds": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Hard Timeout Seconds"
+      },
+      "max_turns": {
+        "default": 90,
+        "title": "Max Turns",
+        "type": "integer"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "type": "string"
+      },
+      "timeout_seconds": {
+        "default": 3600,
+        "title": "Timeout Seconds",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "agent",
+      "prompt"
+    ],
+    "title": "bridge_agent_universal_delegate_startArguments",
+    "type": "object"
+  },
+  "bridge_agent_universal_list": {
+    "properties": {},
+    "title": "bridge_agent_universal_listArguments",
+    "type": "object"
+  },
+  "bridge_peer_delegate_cancel": {
+    "properties": {
+      "peer_id": {
+        "title": "Peer Id",
+        "type": "string"
+      },
+      "task_id": {
+        "title": "Task Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "peer_id",
+      "task_id"
+    ],
+    "title": "bridge_peer_delegate_cancelArguments",
+    "type": "object"
+  },
+  "bridge_peer_delegate_result": {
+    "properties": {
+      "peer_id": {
+        "title": "Peer Id",
+        "type": "string"
+      },
+      "task_id": {
+        "title": "Task Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "peer_id",
+      "task_id"
+    ],
+    "title": "bridge_peer_delegate_resultArguments",
+    "type": "object"
+  },
+  "bridge_peer_delegate_start": {
+    "properties": {
+      "conversation_key": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Conversation Key"
+      },
+      "cwd": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Cwd"
+      },
+      "hard_timeout_seconds": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Hard Timeout Seconds"
+      },
+      "max_turns": {
+        "default": 90,
+        "title": "Max Turns",
+        "type": "integer"
+      },
+      "peer_id": {
+        "title": "Peer Id",
+        "type": "string"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "type": "string"
+      },
+      "timeout_seconds": {
+        "default": 3600,
+        "title": "Timeout Seconds",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "peer_id",
+      "prompt"
+    ],
+    "title": "bridge_peer_delegate_startArguments",
+    "type": "object"
+  },
+  "bridge_peer_delegate_status": {
+    "properties": {
+      "peer_id": {
+        "title": "Peer Id",
+        "type": "string"
+      },
+      "task_id": {
+        "title": "Task Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "peer_id",
+      "task_id"
+    ],
+    "title": "bridge_peer_delegate_statusArguments",
+    "type": "object"
+  },
+  "bridge_peer_status": {
+    "properties": {
+      "peer_id": {
+        "title": "Peer Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "peer_id"
+    ],
+    "title": "bridge_peer_statusArguments",
+    "type": "object"
+  },
+  "bridge_peer_universal_delegate_start": {
+    "properties": {
+      "agent": {
+        "title": "Agent",
+        "type": "string"
+      },
+      "conversation_key": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Conversation Key"
+      },
+      "cwd": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Cwd"
+      },
+      "hard_timeout_seconds": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Hard Timeout Seconds"
+      },
+      "max_turns": {
+        "default": 90,
+        "title": "Max Turns",
+        "type": "integer"
+      },
+      "peer_id": {
+        "title": "Peer Id",
+        "type": "string"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "type": "string"
+      },
+      "timeout_seconds": {
+        "default": 3600,
+        "title": "Timeout Seconds",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "peer_id",
+      "agent",
+      "prompt"
+    ],
+    "title": "bridge_peer_universal_delegate_startArguments",
+    "type": "object"
+  },
+  "bridge_peer_universal_list": {
+    "properties": {
+      "peer_id": {
+        "title": "Peer Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "peer_id"
+    ],
+    "title": "bridge_peer_universal_listArguments",
+    "type": "object"
+  }
+}

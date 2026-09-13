@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
+
+from agent_bridge_storage import AtomicJsonStore, StorageError, atomic_json_write, conversation_lock
 
 
 AGENT_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
@@ -56,10 +59,7 @@ def _redact(value: str, secrets: list[str]) -> str:
 
 
 def _atomic_json_write(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    atomic_json_write(path, value)
 
 
 def _safe_command(value: Any, field: str) -> list[str]:
@@ -152,6 +152,7 @@ class UniversalAgentRegistry:
         ).expanduser()
         self.command_probe = command_probe or self._default_command_probe
         self._lock = threading.RLock()
+        self.session_store = AtomicJsonStore(self.sessions_file)
 
     @staticmethod
     def _default_command_probe(command: list[str]) -> str:
@@ -344,7 +345,7 @@ class UniversalAgentRegistry:
             )
         return sorted(result, key=lambda item: item["agent"])
 
-    def _session_key(self, caller_peer: str, agent: str, conversation_key: str) -> str:
+    def _session_key(self, caller_peer: str, agent: str, conversation_key: str, project_key: str = "") -> str:
         caller = str(caller_peer or "local").strip().lower()
         conversation = str(conversation_key or "default").strip()
         if not AGENT_ID_RE.fullmatch(agent):
@@ -353,14 +354,13 @@ class UniversalAgentRegistry:
             caller = "local"
         if not re.fullmatch(r"[A-Za-z0-9_.:@/-]{1,256}", conversation):
             raise UniversalAdapterError("invalid_request", "conversation_key is invalid")
-        return f"{caller}|{agent}|{conversation}"
+        key = f"{caller}|{agent}|{conversation}"
+        if project_key:
+            key += "|project:" + hashlib.sha256(project_key.encode("utf-8")).hexdigest()
+        return key
 
     def _load_sessions(self) -> dict[str, Any]:
-        try:
-            document = json.loads(self.sessions_file.read_text(encoding="utf-8"))
-            return document if isinstance(document, dict) else {}
-        except Exception:
-            return {}
+        return self.session_store.read()
 
     def _session(self, key: str) -> Optional[str]:
         with self._lock:
@@ -371,25 +371,23 @@ class UniversalAgentRegistry:
     def _save_session(self, key: str, session_id: Optional[str], cwd: Optional[Path]) -> None:
         if not session_id or not SESSION_ID_RE.fullmatch(str(session_id)):
             return
-        with self._lock:
-            document = self._load_sessions()
+        def save(document):
             document[key] = {
                 "session_id": str(session_id),
                 "cwd": str(cwd or ""),
                 "updated_at": time.time(),
             }
-            _atomic_json_write(self.sessions_file, document)
+        self.session_store.mutate(save)
 
     def forget_peer(self, peer_id: str, dry_run: bool = False) -> int:
         prefix = f"{str(peer_id).strip().lower()}|"
-        with self._lock:
-            document = self._load_sessions()
+        def forget(document):
             matches = [key for key in document if key.startswith(prefix)]
             if matches and not dry_run:
                 for key in matches:
                     document.pop(key, None)
-                _atomic_json_write(self.sessions_file, document)
             return len(matches)
+        return forget(self._load_sessions()) if dry_run else self.session_store.mutate(forget)
 
     def execute(
         self,
@@ -406,8 +404,24 @@ class UniversalAgentRegistry:
         manifest = self.manifests().get(agent)
         if not manifest or not manifest.get("enabled") or not manifest.get("available"):
             raise UniversalAdapterError("agent_unavailable", f"agent is not available: {agent}")
-        session_key = self._session_key(caller_peer, agent, conversation_key)
-        session_id = self._session(session_key)
+        project_key = os.path.normcase(str(Path(cwd).resolve())) if cwd else ""
+        session_key = self._session_key(caller_peer, agent, conversation_key, project_key)
+        # The lock spans lookup, external delivery and persistence. Competing
+        # bridge processes must observe the first delivery's session before resuming.
+        try:
+            with conversation_lock(self.state_dir, session_key, hard_timeout_seconds, cancel_event):
+                session_id = self._session(session_key)
+                if not session_id and project_key:
+                    legacy = self._load_sessions().get(self._session_key(caller_peer, agent, conversation_key), {})
+                    if isinstance(legacy, dict) and legacy.get("cwd") and os.path.normcase(str(Path(legacy["cwd"]).resolve())) == project_key:
+                        session_id = self._session(self._session_key(caller_peer, agent, conversation_key))
+                return self._execute_serialized(manifest, agent, prompt, cwd, max_turns, session_key,
+                                                session_id, conversation_key, hard_timeout_seconds, cancel_event)
+        except StorageError as exc:
+            raise UniversalAdapterError(exc.code, str(exc)) from exc
+
+    def _execute_serialized(self, manifest, agent, prompt, cwd, max_turns, session_key,
+                            session_id, conversation_key, hard_timeout_seconds, cancel_event):
         if manifest["kind"] == "cli":
             result = self._execute_cli(
                 manifest,
@@ -488,8 +502,10 @@ class UniversalAgentRegistry:
         )
         deadline = time.monotonic() + hard_timeout_seconds
         status = "running"
-        while proc.poll() is None:
-            if cancel_event.wait(0.1):
+        # communicate drains both pipes during execution; waiting for exit before
+        # draining deadlocks once a useful reply exceeds the OS pipe capacity.
+        while True:
+            if cancel_event.is_set():
                 status = "canceled"
                 self._terminate(proc)
                 break
@@ -497,6 +513,11 @@ class UniversalAgentRegistry:
                 status = "timed_out"
                 self._terminate(proc)
                 break
+            try:
+                stdout, stderr = proc.communicate(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                continue
         stdout, stderr = proc.communicate(timeout=10)
         if status == "running":
             status = "completed" if proc.returncode == 0 else "failed"
@@ -512,7 +533,7 @@ class UniversalAgentRegistry:
         return {
             "status": status,
             "exit_code": proc.returncode,
-            "stdout": _tail(_redact(stdout, secrets)),
+            "stdout": _redact(stdout, secrets),
             "stderr_tail": _tail(_redact(stderr, secrets)),
             "session_id": session_match.group(1) if session_match else session_id,
         }
@@ -641,7 +662,7 @@ class UniversalAgentRegistry:
                 return {
                     "status": "completed",
                     "exit_code": 0,
-                    "stdout": _tail(_redact(str(output or ""), secret_values)),
+                    "stdout": _redact(str(output or ""), secret_values),
                     "stderr_tail": "",
                     "session_id": new_session or session_id,
                 }
@@ -690,7 +711,7 @@ class UniversalAgentRegistry:
                     return {
                         "status": status,
                         "exit_code": 0 if status == "completed" else None,
-                        "stdout": _tail(_redact(str(output or final_text or ""), secret_values)),
+                        "stdout": _redact(str(output or final_text or ""), secret_values),
                         "stderr_tail": "",
                         "session_id": new_session or session_id,
                         "remote_task_id": remote_task_id,

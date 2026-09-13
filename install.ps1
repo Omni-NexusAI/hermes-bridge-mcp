@@ -19,47 +19,36 @@ $BridgeHome = if ($env:AGENT_BRIDGE_HOME) {
 $BridgeBin = Join-Path $BridgeHome "bin"
 $StartupDir = [Environment]::GetFolderPath("Startup")
 $HermesPython = Join-Path $HermesHome "hermes-agent\venv\Scripts\python.exe"
-
+$BootstrapPython = $env:AGENT_BRIDGE_PYTHON
+if (-not $BootstrapPython) { $BootstrapPython = (Get-Command python -ErrorAction SilentlyContinue).Source }
+if (-not $BootstrapPython) { $BootstrapPython = (Get-Command py -ErrorAction SilentlyContinue).Source }
+if (-not $BootstrapPython -and (Test-Path -LiteralPath $HermesPython)) { $BootstrapPython = $HermesPython }
+if (-not $BootstrapPython) { throw "Install Python 3.10+ or set AGENT_BRIDGE_PYTHON; Hermes is optional." }
+& $BootstrapPython -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)"
+if ($LASTEXITCODE -ne 0) { throw "Bootstrap requires working Python 3.10+. No bridge launchers were changed." }
+$env:AGENT_BRIDGE_HOME = $BridgeHome
+Write-Host "Installing the versioned native bridge runtime and pinned dependencies..."
+& $BootstrapPython (Join-Path $RepoRoot "bootstrap.py") install --source $RepoRoot | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "Runtime installation failed. Existing release and startup entries were retained." }
 New-Item -ItemType Directory -Force -Path $BridgeBin | Out-Null
-
-if (Test-Path -LiteralPath $HermesPython) {
-    Write-Host "Installing the versioned native bridge runtime and pinned dependencies..."
-    & $HermesPython (Join-Path $RepoRoot "bootstrap.py") install --source $RepoRoot | Out-Host
+# Compatibility entrypoints and helpers must move together. The active runtime
+# remains selected atomically by current.json, including its dependency Python.
+Get-ChildItem -LiteralPath (Join-Path $RepoRoot "bin") -File | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $BridgeBin $_.Name) -Force
+}
+$ExistingStartup = @("Watch Agent Bridge MCP.vbs", "Watch Windows Hermes MCP Bridge.vbs") |
+    Where-Object { Test-Path -LiteralPath (Join-Path $StartupDir $_) }
+if (-not $ExistingStartup) {
+    $watchdog = (Join-Path $BridgeBin "agent-bridge-background-watchdog.ps1").Replace('"', '""')
+    $startupHome = $BridgeHome.Replace('"', '""')
+    $launcher = @"
+Set shell = CreateObject("WScript.Shell")
+shell.Environment("Process")("AGENT_BRIDGE_HOME") = "$startupHome"
+shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$watchdog""", 0, False
+"@
+    Set-Content -LiteralPath (Join-Path $StartupDir "Watch Agent Bridge MCP.vbs") -Value $launcher -Encoding Unicode
 } else {
-    Write-Warning "Hermes Python was not found at $HermesPython; run bootstrap.py install to create the bridge runtime."
-}
-
-$binFiles = @(
-    "agent-bridge-mcp.py",
-    "agent_bridge_universal.py",
-    "agent-bridge-mcp-serve.cmd",
-    "start-agent-bridge.ps1",
-    "start-agent-bridge-peer.ps1",
-    "start-agent-bridge-peer.sh",
-    "agent-bridge-background-watchdog.ps1",
-    "hermes-bridge-mcp-serve.cmd",
-    "start-hermes-bridge-peer.ps1",
-    "hermes_bridge_network.py",
-    "bridge_pairing_tools.py",
-    "windows-hermes-proxy-mcp.py",
-    "windows-hermes-mcp-serve.cmd",
-    "start-windows-hermes-bridge.ps1",
-    "start-windows-hermes-bridge-staging.ps1",
-    "start-windows-hermes-peer-bridge.ps1",
-    "windows-hermes-bridge-background-watchdog.ps1"
-)
-
-foreach ($file in $binFiles) {
-    Copy-Item -LiteralPath (Join-Path $RepoRoot "bin\$file") -Destination (Join-Path $BridgeBin $file) -Force
-}
-
-$startupFiles = @(
-    "Watch Agent Bridge MCP.vbs",
-    "Watch Windows Hermes MCP Bridge.vbs"
-)
-
-foreach ($file in $startupFiles) {
-    Copy-Item -LiteralPath (Join-Path $RepoRoot "startup\$file") -Destination (Join-Path $StartupDir $file) -Force
+    Write-Host "Preserved existing Startup entry: $($ExistingStartup -join ', '). Both compatibility watchdogs share one owner lock."
 }
 
 $bridge = Join-Path $BridgeBin "start-agent-bridge.ps1"
@@ -69,7 +58,9 @@ Write-Host "Installed hidden Startup launchers to: $StartupDir"
 
 Write-Host "Starting native Agent Bridge MCP and secure peer listener..."
 powershell -NoProfile -ExecutionPolicy Bypass -File $bridge | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "Local listener did not report readiness. Checkpoint active tasks before a deliberate -Restart." }
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $BridgeBin "start-agent-bridge-peer.ps1") | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "Peer listener did not report readiness; inspect local diagnostics." }
 
 if ($A0SettingsPath) {
     $helper = Join-Path $RepoRoot "scripts\configure-a0-mcp.py"

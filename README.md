@@ -1,6 +1,6 @@
 # Agent Bridge MCP
 
-Current bridge version: `v1.3.5` (release candidate).
+Compatibility version: `v1.3.5`; reliability and owner-routing candidate identified by its payload build revision.
 
 Agent Bridge MCP is a universal, secure MCP delegation bridge. An MCP-compatible
 caller can select Hermes, Codex, A0, or another host-enabled adapter locally or
@@ -33,6 +33,11 @@ bridge anymore; install Hermes messaging integrations separately if needed.
 - `bridge_agent_universal_delegate_start`
 - `bridge_peer_universal_list`
 - `bridge_peer_universal_delegate_start`
+- Optional `bridge_agent_projects_list`, `bridge_agent_conversations_list`,
+  `bridge_agent_conversation_read`, and `bridge_agent_routed_delegate_start`
+  (with corresponding `bridge_peer_*` tools).
+- `bridge_agent_complete_result` and `bridge_peer_complete_result` for lossless
+  reply retrieval, including target conversation and delivery evidence.
 
 Legacy `windows_agent_*` aliases are hidden by default. Set
 `AGENT_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS=1` only for older bridge clients that
@@ -86,16 +91,24 @@ It does not expose a raw PowerShell or CMD proxy.
 
 Hermes and Codex manifests are auto-detected. Codex supports current
 `codex mcp-server`/`threadId` and legacy `codex mcp`/`sessionId` variants.
-Codex work creates or continues bridge-managed Codex tasks; v1.3.5 does not
-attach to arbitrary already-open Codex Desktop tasks.
+This MCP adapter creates or continues bridge-managed Codex tasks. The optional
+owner-routing adapter can reuse existing conversations only when the host exposes
+the server that actually owns those conversations. Desktop attachment and Desktop
+project registration must be validated on the installed host; configuration alone
+does not establish either capability. See [owner routing](docs/codex-owner-routing.md).
 
 Additional adapters are configured by the host in `agents.json`; see
 [`config/agents.example.json`](config/agents.example.json). Remote requests can
 select an enabled `agent`, but cannot supply executables, credentials, model
 overrides, sandbox escalation, or unrestricted execution settings. Persistent
-sessions are keyed by caller peer, agent identifier, and conversation key.
+sessions are keyed by caller peer, agent identifier, local project, and conversation key.
 Unknown or disabled agents return `agent_unavailable`; older peers without the
 extension return `extension_unsupported`.
+
+Task/session writes are transactional across bridge processes. Interrupted deliveries
+are retained for reconciliation without implicit reruns. Complete replies survive
+restart; existing result tools retain bounded previews, while `*_complete_result`
+returns consecutive pages using `next_offset` until it is null.
 
 ## Secure Peer Bridge
 

@@ -5,10 +5,14 @@ import argparse
 import json
 import os
 import shutil
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
+from agent_bridge_runtime import atomic_json, state_dir
 
 
 DEFAULT_URL = "http://host.docker.internal:18082/mcp"
@@ -41,6 +45,8 @@ def parse_mcp_servers(settings: dict) -> dict:
 
 
 def configure(settings: dict, name: str, url: str, bearer_token: str = "") -> tuple[dict, bool]:
+    # Do not mutate the caller's nested config while calculating changes.
+    settings = json.loads(json.dumps(settings))
     parsed = parse_mcp_servers(settings)
     servers = parsed["mcpServers"]
     desired = {
@@ -57,8 +63,16 @@ def configure(settings: dict, name: str, url: str, bearer_token: str = "") -> tu
         "tool_timeout": DEFAULT_TOOL_TIMEOUT,
         "timeout": DEFAULT_TOOL_TIMEOUT,
     }
+    existing = servers.get(name)
+    if existing is not None and not isinstance(existing, dict):
+        raise TypeError("existing MCP server must be an object")
+    if existing:
+        desired.update(existing)
+    # URL/token are the explicit connection update. Existing disabled state,
+    # descriptions, timeouts, custom headers and other host options survive.
+    desired["url"] = url
     if bearer_token:
-        desired["headers"] = {"Authorization": f"Bearer {bearer_token}"}
+        desired["headers"] = {**desired.get("headers", {}), "Authorization": f"Bearer {bearer_token}"}
     changed = servers.get(name) != desired
     servers[name] = desired
     settings["mcp_servers"] = json.dumps(parsed, indent=2, ensure_ascii=False)
@@ -75,7 +89,7 @@ def check_health(url: str, timeout: float = 5.0) -> dict:
                 "status": response.status,
                 "body": body,
             }
-    except (OSError, urllib.error.URLError) as exc:
+    except (OSError, urllib.error.URLError, ValueError, AttributeError) as exc:
         return {
             "url": url,
             "ok": False,
@@ -99,10 +113,7 @@ def main() -> int:
     if args.token_file:
         token_path = Path(args.token_file)
     else:
-        local = Path(os.environ.get("LOCALAPPDATA", ""))
-        canonical = local / "agent-bridge" / "bridge-state" / "local-mcp-token"
-        legacy = local / "hermes" / "bridge-state" / "local-mcp-token"
-        token_path = legacy if legacy.is_file() else canonical
+        token_path = state_dir() / "local-mcp-token"
     bearer_token = token_path.read_text(encoding="utf-8").strip() if token_path.is_file() else ""
     updated, changed = configure(settings, args.name, args.url, bearer_token)
 
@@ -129,9 +140,7 @@ def main() -> int:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_path = settings_path.with_name(f"{settings_path.name}.bak.{timestamp}")
     shutil.copy2(settings_path, backup_path)
-    with settings_path.open("w", encoding="utf-8") as handle:
-        json.dump(updated, handle, indent=4, ensure_ascii=False)
-        handle.write("\n")
+    atomic_json(settings_path, updated)
 
     result["backup"] = str(backup_path)
     result["verify_in_ui"] = (

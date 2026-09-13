@@ -1,3 +1,3 @@
+param([switch]$Restart)
 $ErrorActionPreference = "Stop"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-& (Join-Path $ScriptDir "start-windows-hermes-bridge.ps1")
+& (Join-Path $PSScriptRoot "start-windows-hermes-bridge.ps1") -Restart:$Restart

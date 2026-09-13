@@ -1,0 +1,17 @@
+{
+  "owner": {
+    "endpoint": "ws://127.0.0.1:4500",
+    "desktop_owner": false,
+    "supports_steer": false,
+    "token_env": "CODEX_OWNER_TOKEN"
+  },
+  "projects": [
+    {
+      "id": "host-project-id",
+      "repository": "https://github.com/example/project.git",
+      "cwd": "C:/Projects/project",
+      "cwd_aliases": []
+    }
+  ],
+  "projectless_cwd": "C:/AgentWork/projectless"
+}

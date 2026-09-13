@@ -25,6 +25,29 @@ Runtime code and launchers for local delegation, peer networking, discovery, pai
   peers. Capabilities must never be exposed in public discovery metadata.
 - A new device identity always requires user approval. Known pinned identities may reconnect or rekey automatically.
 - Runtime state writes must be atomic and safe across the local and peer bridge processes.
+- `agent_bridge_storage.py` owns transactional task/session stores and OS locks.
+  Preserve complete replies; bound public previews separately. Positively dead
+  owners require reconciliation; never silently rerun an uncertain delivery.
+- `agent_bridge_identity.py` owns persistent identity creation and signing.
+  Missing identity components, mismatched keys, and corrupt trust/revocation state
+  fail closed without replacing user identity or forgetting trust.
+- `agent_bridge_codex.py` owns explicit owner RPC and host-owned project mapping;
+  `agent_bridge_conversations.py` owns optional tools and queued job orchestration.
+  Caller paths, executables, credentials, models and permission overrides are forbidden.
+  Reuse caller/agent/project/topic associations and actual conversation context.
+  Queue ordinary contributions; guarded steering must not wait behind polling locks.
+  Validate project association before delivery and retrieve the acknowledged turn.
+- Routed queue inputs are private bridge state. Startup and result polling may
+  resume known unsent queues with the same request ID; uncertain or acknowledged
+  deliveries only reconcile. Cancellation preserves already accepted owner work.
+- Conversation extensions accept local callers or authenticated managed peers;
+  legacy unauthenticated/shared-token LAN access does not grant owner access.
+  Apply the same gate when core status, result, or cancel tools address routed tasks.
+- Installers activate content-addressed payloads and their separate Python environments
+  atomically. Rollback retains both previous source and previous dependencies.
+  Windows launchers verify executable/script ownership and matching readiness,
+  process ID and build revision. Restart only after checkpointing affected tasks;
+  watchdog aliases share one owner lock and never kill an unhealthy process implicitly.
 - `hermes_bridge_network.py` owns device identity, managed peer state, durable revocations, mDNS, pairing HTTP routes, pinned TLS, signed introductions, and recovery.
 - Managed secrets live only in restricted `bridge-state/network` files; public MCP status must expose booleans and fingerprints, never credentials.
 - Pairing and rekey routes accept only bounded requests from loopback, private, link-local, or official Tailscale source ranges; Tailscale ranges require the Tailscale backend.

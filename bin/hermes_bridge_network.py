@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import contextlib
 import ipaddress
 import json
@@ -13,18 +12,18 @@ import ssl
 import subprocess
 import threading
 import time
-import uuid
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
+from agent_bridge_storage import AtomicJsonStore as _SharedAtomicJsonStore, InterProcessFileLock
+from agent_bridge_identity import (
+    DeviceIdentity, IdentityStore, PEER_ID_RE, _canonical, _b64, _unb64,
+    _safe_peer_id, _fingerprint_cert, _public_key_from_cert, _verify_signature,
+    _restricted_write,
+)
 
 
 for _key, _value in list(os.environ.items()):
@@ -50,30 +49,10 @@ TAILSCALE_IPV6_RANGE = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 MAX_NETWORK_BODY = 64 * 1024
 PAIR_REQUEST_TTL_SECONDS = 300
 CANDIDATE_TTL_SECONDS = 180
-PEER_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
 
 
 def _now() -> float:
     return time.time()
-
-
-def _canonical(data: dict[str, Any]) -> bytes:
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-def _b64(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
-
-
-def _unb64(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-
-
-def _safe_peer_id(value: Any) -> str:
-    peer_id = str(value or "").strip()
-    if not PEER_ID_RE.fullmatch(peer_id):
-        raise ValueError("peer_id must be 1-96 letters, numbers, dot, colon, underscore, or dash")
-    return peer_id
 
 
 def _validate_peer_url(value: Any) -> str:
@@ -123,101 +102,7 @@ def _url_host(address: str) -> str:
     return f"[{parsed}]" if isinstance(parsed, ipaddress.IPv6Address) else str(parsed)
 
 
-def _fingerprint_cert(cert_pem: str | bytes) -> str:
-    raw = cert_pem.encode("utf-8") if isinstance(cert_pem, str) else cert_pem
-    cert = x509.load_pem_x509_certificate(raw)
-    return cert.fingerprint(hashes.SHA256()).hex()
-
-
-def _public_key_from_cert(cert_pem: str | bytes):
-    raw = cert_pem.encode("utf-8") if isinstance(cert_pem, str) else cert_pem
-    return x509.load_pem_x509_certificate(raw).public_key()
-
-
-def _verify_signature(cert_pem: str, payload: dict[str, Any], signature: str) -> None:
-    key = _public_key_from_cert(cert_pem)
-    if not isinstance(key, ec.EllipticCurvePublicKey):
-        raise ValueError("unsupported identity key")
-    key.verify(_unb64(signature), _canonical(payload), ec.ECDSA(hashes.SHA256()))
-
-
-def _restricted_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    with open(tmp, "xb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    with contextlib.suppress(OSError):
-        os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o600)
-
-
-class InterProcessFileLock:
-    """Small standard-library lock used by both local and peer bridge processes."""
-
-    def __init__(self, path: Path):
-        self.path = path
-        self.handle = None
-
-    def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = open(self.path, "a+b")
-        self.handle.seek(0, os.SEEK_END)
-        if self.handle.tell() == 0:
-            self.handle.write(b"0")
-            self.handle.flush()
-        self.handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            while True:
-                try:
-                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_LOCK, 1)
-                    break
-                except OSError:
-                    time.sleep(0.02)
-        else:
-            import fcntl
-
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if not self.handle:
-            return
-        self.handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-        self.handle.close()
-        self.handle = None
-
-
-class AtomicJsonStore:
-    def __init__(self, path: Path, default_factory: Callable[[], dict[str, Any]]):
-        self.path = path
-        self.lock_path = path.with_suffix(path.suffix + ".lock")
-        self.default_factory = default_factory
-
-    def _read_unlocked(self) -> dict[str, Any]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else self.default_factory()
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return self.default_factory()
-
-    def read(self) -> dict[str, Any]:
-        with InterProcessFileLock(self.lock_path):
-            return self._read_unlocked()
-
+class AtomicJsonStore(_SharedAtomicJsonStore):
     def mutate(self, callback: Callable[[dict[str, Any]], Any]) -> Any:
         with InterProcessFileLock(self.lock_path):
             data = self._read_unlocked()
@@ -225,92 +110,6 @@ class AtomicJsonStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             _restricted_write(self.path, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
             return result
-
-
-@dataclass(frozen=True)
-class DeviceIdentity:
-    peer_id: str
-    display_name: str
-    fingerprint: str
-    cert_pem: str
-    cert_path: Path
-    key_path: Path
-
-
-class IdentityStore:
-    def __init__(self, state_dir: Path):
-        self.root = state_dir / "network"
-        self.key_path = self.root / "identity-key.pem"
-        self.cert_path = self.root / "identity-cert.pem"
-        self.meta_path = self.root / "identity.json"
-        self.lock_path = self.root / "identity.lock"
-
-    def ensure(self) -> DeviceIdentity:
-        with InterProcessFileLock(self.lock_path):
-            if not (self.key_path.exists() and self.cert_path.exists() and self.meta_path.exists()):
-                self._create()
-            meta = json.loads(self.meta_path.read_text(encoding="utf-8"))
-            cert_pem = self.cert_path.read_text(encoding="utf-8")
-            fingerprint = _fingerprint_cert(cert_pem)
-            if fingerprint != meta.get("fingerprint"):
-                raise ValueError("identity certificate fingerprint does not match metadata")
-            return DeviceIdentity(
-                peer_id=_safe_peer_id(meta["peer_id"]),
-                display_name=str(meta.get("display_name") or meta["peer_id"]),
-                fingerprint=fingerprint,
-                cert_pem=cert_pem,
-                cert_path=self.cert_path,
-                key_path=self.key_path,
-            )
-
-    def _create(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        configured = os.environ.get("HERMES_BRIDGE_PEER_ID")
-        peer_id = _safe_peer_id(configured) if configured else f"hermes-{uuid.uuid4().hex[:16]}"
-        display_name = os.environ.get("HERMES_BRIDGE_DISPLAY_NAME") or platform.node() or peer_id
-        key = ec.generate_private_key(ec.SECP256R1())
-        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, peer_id)])
-        now = datetime.now(timezone.utc)
-        cert = (
-            x509.CertificateBuilder()
-            .subject_name(subject)
-            .issuer_name(subject)
-            .public_key(key.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(now - timedelta(minutes=5))
-            .not_valid_after(now + timedelta(days=3650))
-            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName(peer_id), x509.DNSName("localhost")]), critical=False)
-            .sign(key, hashes.SHA256())
-        )
-        key_pem = key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        )
-        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-        _restricted_write(self.key_path, key_pem)
-        _restricted_write(self.cert_path, cert_pem)
-        _restricted_write(
-            self.meta_path,
-            json.dumps(
-                {
-                    "peer_id": peer_id,
-                    "display_name": display_name,
-                    "fingerprint": cert.fingerprint(hashes.SHA256()).hex(),
-                    "created_at": _now(),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ).encode("utf-8"),
-        )
-
-    def sign(self, payload: dict[str, Any]) -> str:
-        self.ensure()
-        key = serialization.load_pem_private_key(self.key_path.read_bytes(), password=None)
-        if not isinstance(key, ec.EllipticCurvePrivateKey):
-            raise ValueError("unsupported identity private key")
-        return _b64(key.sign(_canonical(payload), ec.ECDSA(hashes.SHA256())))
 
 
 def _empty_network_state() -> dict[str, Any]:
@@ -336,8 +135,10 @@ class PairingState:
 
     def _revoked(self) -> dict[str, Any]:
         data = self.revocations.read()
-        revoked = data.get("revoked", {})
-        return revoked if isinstance(revoked, dict) else {}
+        revoked = data.get("revoked")
+        if not isinstance(revoked, dict):
+            raise ValueError("durable revocations are malformed; restore state before pairing")
+        return revoked
 
     @staticmethod
     def _prune(data: dict[str, Any]) -> None:
@@ -349,6 +150,9 @@ class PairingState:
         data.setdefault("used_nonces", {})
         data.setdefault("approval_windows", {})
         data.setdefault("unpair_transactions", {})
+        for field in ("peers", "candidates", "rejected", "revoked", "used_nonces", "approval_windows", "unpair_transactions"):
+            if not isinstance(data[field], dict):
+                raise ValueError("pairing state is malformed; restore state before pairing")
         for key, value in list(data["candidates"].items()):
             if float(value.get("expires_at", 0)) < now:
                 data["candidates"].pop(key, None)

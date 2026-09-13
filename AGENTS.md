@@ -7,6 +7,8 @@
 - Preserve the stable v1.2.7 `bridge_agent_*` and `bridge_peer_*` core tool contract unless a breaking version is explicitly declared.
 - Agent Bridge MCP v1.3.5 adds four `universal_agent_v1` extension tools;
   keep them separate from the exact 11-tool compatibility contract.
+- `conversation_routing_v1` adds optional host-mapped owner conversation tools
+  and lossless result retrieval; preserve all fifteen earlier schemas exactly.
 - Pairing MCP Prompts are optional discovery conveniences; pairing tools remain
   authoritative and compatibility commands remain available for clients that
   do not expose MCP Prompts.
@@ -35,10 +37,16 @@
   without invoking a real installed agent.
 - Run `python -m pytest -q` from an isolated environment when dependencies are available.
 
-## User Preferences
+## Rollout Boundaries
 
-- Do not update or test against any existing agent or currently paired device during automatic-discovery development.
-- Deliver an uninstalled release candidate for later testing on unpaired devices.
+- Automated tests remain isolated. Live rollout needs explicit target authorization;
+  an authorization to update identified hosts does not extend to other paired devices.
+- Preserve disabled integrations and established repository checkouts. Do not copy
+  repositories between hosts or publish implementation changes without authorization.
+- A bridge task completion status is insufficient acceptance: retrieve actual replies,
+  demonstrate retained context and project association, and record running versions.
+- Existing Codex Desktop attachment requires its owning server. A new app-server or
+  a host-configured owner assertion alone is not evidence of Desktop attachment.
 
 ## Child DOX Index
 
