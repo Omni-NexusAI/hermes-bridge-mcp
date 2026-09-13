@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.mark.parametrize("scenario", [
     "ready_child", "ready_busy", "inspection_denied", "listener_inventory_denied",
-    "restart", "autoexit", "unknown_child", "unknown_descendant",
+    "restart", "delayed_restart", "autoexit", "unknown_child", "unknown_descendant",
     "wrong_base", "wrong_script", "older_child", "reused_child", "reused_root", "foreign_listener",
 ])
 def test_redirector_tree_ownership_and_restart(tmp_path, scenario):
@@ -40,7 +40,7 @@ $script:rows = @(
     (Make-Process 201 200 $base 11 $command),
     (Make-Process 202 200 (Join-Path $env:SystemRoot 'System32\conhost.exe') 11 'conhost.exe')
 )
-$script:stopped = @(); $script:probed = @(); $script:listener = 201
+$script:stopped = @(); $script:probed = @(); $script:listener = 201; $script:drain = 0
 function Get-CimInstance {
     param($ClassName, $Filter)
     if ($scenario -eq 'inspection_denied') { throw [UnauthorizedAccessException]::new('synthetic CIM denied') }
@@ -60,9 +60,19 @@ function Test-BridgeReady {
 function Stop-Process {
     param($Id)
     $script:stopped += $Id
+    if ($scenario -eq 'delayed_restart' -and $Id -eq 201) { $script:drain = 3; return }
     $script:rows = @($script:rows | Where-Object ProcessId -ne $Id)
     if ($Id -eq $script:listener) { $script:listener = $null }
     if ($scenario -eq 'autoexit' -and $Id -eq 201) { $script:rows = @() }
+}
+function Start-Sleep {
+    if ($script:drain -gt 0) {
+        $script:drain--
+        if ($script:drain -eq 0) {
+            $script:rows = @($script:rows | Where-Object ProcessId -ne 201)
+            $script:listener = $null
+        }
+    }
 }
 function Wait-Process {}
 function Get-Process { param($Id); return @($script:rows | Where-Object ProcessId -eq $Id) }
@@ -92,7 +102,7 @@ switch ($scenario) {
     'reused_root' { $script:rows[0] = Make-Process 200 100 $PythonExe 20 $command }
     'foreign_listener' { $script:listener = 999 }
 }
-if ($scenario -in @('restart','autoexit')) {
+if ($scenario -in @('restart','delayed_restart','autoexit')) {
     Stop-OwnedBridgeTree $tree 49123
     $expected = if ($scenario -eq 'autoexit') {'201'} else {'201,200'}
     if (($script:stopped -join ',') -ne $expected) { throw ('wrong termination order: ' + ($script:stopped -join ',')) }

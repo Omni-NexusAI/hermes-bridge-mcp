@@ -89,6 +89,14 @@ def test_atomic_marker_failure_leaves_old_document(tmp_path, monkeypatch):
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_installer_requests_guarded_convergence_for_every_listener():
+    """A selected payload is not a successful update until both launcher roles agree."""
+    installer = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    assert "-File $bridge -Restart" in installer
+    assert '"start-agent-bridge-peer.ps1") -Restart' in installer
+    assert "did not converge to the selected release" in installer
+
+
 def test_a0_disabled_customization_and_headers_survive():
     module = load_file("a0_setup_test", "scripts/configure-a0-mcp.py")
     original = {"mcp_servers": {"mcpServers": {"agent-bridge": {

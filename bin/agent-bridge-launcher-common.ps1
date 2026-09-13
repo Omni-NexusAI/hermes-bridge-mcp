@@ -157,8 +157,21 @@ function Stop-OwnedBridgeTree($Tree, [int]$Port) {
         $confirmed = @($current.Servers | Where-Object { $_.ProcessId -eq $target.ProcessId })
         if (-not $confirmed.Count) { continue }
         Stop-Process -Id $target.ProcessId -Force -ErrorAction Stop
-        Wait-Process -Id $target.ProcessId -Timeout 10 -ErrorAction SilentlyContinue
-        if (Get-Process -Id $target.ProcessId -ErrorAction SilentlyContinue) { throw 'Owned bridge did not exit; no second listener was started.' }
+        # A Windows venv redirector can outlive its child briefly after a force
+        # stop.  Do not interpret that short drain period as permission to launch
+        # a second listener, and do not leave an update half-applied after the
+        # former listener eventually exits.  Re-read CIM on every pass so a PID
+        # reuse or a changed command line still fails closed.
+        $deadline = (Get-Date).AddSeconds(30)
+        while ($true) {
+            $remaining = @(Get-CimInstance Win32_Process -Filter "ProcessId = $($target.ProcessId)" -ErrorAction Stop)
+            if (-not $remaining.Count) { break }
+            if ($remaining.Count -ne 1 -or $remaining[0].CreationDate -ne $target.CreationDate -or $remaining[0].ExecutablePath -ne $target.ExecutablePath -or $remaining[0].CommandLine -ne $target.CommandLine) {
+                throw 'Bridge process identity changed while waiting for shutdown; no second listener was started.'
+            }
+            if ((Get-Date) -ge $deadline) { throw 'Owned bridge shutdown is still pending after 30 seconds; no second listener was started.' }
+            Start-Sleep -Milliseconds 250
+        }
     }
 }
 

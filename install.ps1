@@ -56,11 +56,16 @@ $bridge = Join-Path $BridgeBin "start-agent-bridge.ps1"
 Write-Host "Installed Agent Bridge MCP scripts to: $BridgeBin"
 Write-Host "Installed hidden Startup launchers to: $StartupDir"
 
-Write-Host "Starting native Agent Bridge MCP and secure peer listener..."
-powershell -NoProfile -ExecutionPolicy Bypass -File $bridge | Out-Host
-if ($LASTEXITCODE -ne 0) { throw "Local listener did not report readiness. Checkpoint active tasks before a deliberate -Restart." }
-powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $BridgeBin "start-agent-bridge-peer.ps1") | Out-Host
-if ($LASTEXITCODE -ne 0) { throw "Peer listener did not report readiness; inspect local diagnostics." }
+Write-Host "Reconciling native Agent Bridge MCP and peer listeners with the selected runtime..."
+# bootstrap.py has already made a state-preserving payload checkpoint.  Always
+# request a guarded restart here: the launcher will reuse a matching ready
+# listener, but will drain a verified prior-release tree before starting a
+# replacement.  This prevents a successful install from leaving one owned
+# listener on a previous venv merely because its PID survived a short drain.
+powershell -NoProfile -ExecutionPolicy Bypass -File $bridge -Restart | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "Local listener did not converge to the selected release. Existing state and the prior payload were retained; inspect the reported ownership, readiness, or authentication layer." }
+powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $BridgeBin "start-agent-bridge-peer.ps1") -Restart | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "Peer listener did not converge to the selected release. Existing state and the prior payload were retained; inspect the reported ownership, readiness, or authentication layer." }
 
 if ($A0SettingsPath) {
     $helper = Join-Path $RepoRoot "scripts\configure-a0-mcp.py"

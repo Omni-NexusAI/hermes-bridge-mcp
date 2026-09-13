@@ -54,6 +54,11 @@ Runtime code and launchers for local delegation, peer networking, discovery, pai
   Explicit restart stops the verified interpreter before its launcher, refuses
   active or unknown descendants and reused process IDs, and leaves direct system
   console-host cleanup to Windows. Inspection failures must prevent new launches.
+- A state-preserving installer requests guarded convergence for every enabled
+  owned listener. A matching ready release is reused; a verified prior release
+  drains before a replacement starts. Redirector shutdown may take up to 30
+  seconds, but PID reuse, changed ownership, an unknown listener, or an expired
+  drain window must leave the payload checkpoint intact and report no success.
 - `hermes_bridge_network.py` owns device identity, managed peer state, durable revocations, mDNS, pairing HTTP routes, pinned TLS, signed introductions, and recovery.
 - Managed secrets live only in restricted `bridge-state/network` files; public MCP status must expose booleans and fingerprints, never credentials.
 - Pairing and rekey routes accept only bounded requests from loopback, private, link-local, or official Tailscale source ranges; Tailscale ranges require the Tailscale backend.
