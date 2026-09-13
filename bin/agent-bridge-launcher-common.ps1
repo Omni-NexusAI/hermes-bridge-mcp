@@ -36,9 +36,7 @@ function Test-BridgeProcessOwnership($Process, [string]$ExpectedScript, [string]
     return $Process.CommandLine -match $scriptPattern
 }
 
-function Get-OwnedBridgeProcess([int]$ProcessId) {
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
-    if (-not $process) { return $null }
+function Get-BridgeProcessCandidates {
     # Accept the selected release, its explicit rollback release, and installed
     # compatibility wrappers. Never infer ownership from process name or PID alone.
     $candidates = @(@{ release = $Release; python = $PythonExe })
@@ -48,12 +46,120 @@ function Get-OwnedBridgeProcess([int]$ProcessId) {
         if ($marker.previous) { $candidates += @{ release = $marker.previous; python = $(if ($marker.previous_python) { $marker.previous_python } else { Join-Path $RuntimeRoot "venv\Scripts\python.exe" }) } }
     }
     $candidates += @{ release = $BridgeHome; python = (Join-Path $LegacyHome "hermes-agent\venv\Scripts\python.exe") }
-    foreach ($candidate in $candidates) {
+    return $candidates
+}
+
+function Get-OwnedBridgeProcess([int]$ProcessId) {
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+    if (-not $process) { return $null }
+    foreach ($candidate in (Get-BridgeProcessCandidates)) {
         foreach ($name in @("agent-bridge-mcp.py", "windows-hermes-proxy-mcp.py")) {
             if (Test-BridgeProcessOwnership $process (Join-Path $candidate.release "bin\$name") $candidate.python) { return $process }
         }
     }
     throw "PID $ProcessId does not have verified bridge executable and script ownership; leaving it running."
+}
+
+function Get-BridgeBaseExecutables([string]$VenvPython) {
+    # Windows venv python.exe redirects to this explicitly configured interpreter.
+    # Do not accept arbitrary python.exe processes, even with matching arguments.
+    $configPath = Join-Path (Split-Path (Split-Path $VenvPython -Parent) -Parent) 'pyvenv.cfg'
+    if (-not (Test-Path -LiteralPath $configPath)) { return @() }
+    $executables = @()
+    foreach ($line in (Get-Content -LiteralPath $configPath)) {
+        if ($line -match '^\s*(executable|base-executable|home)\s*=\s*(.+?)\s*$') {
+            $key = $Matches[1]; $value = $Matches[2].Trim('"')
+            if (-not [IO.Path]::IsPathRooted($value)) { continue }
+            if ($key -eq 'home') { $value = Join-Path $value 'python.exe' }
+            $executables += [IO.Path]::GetFullPath($value)
+        }
+    }
+    return @($executables | Select-Object -Unique)
+}
+
+function Get-OwnedBridgeTree([int]$ProcessId, [switch]$ForRestart) {
+    $root = Get-OwnedBridgeProcess $ProcessId
+    if (-not $root) { return $null }
+    $scripts = @()
+    foreach ($candidate in (Get-BridgeProcessCandidates)) {
+        foreach ($name in @('agent-bridge-mcp.py', 'windows-hermes-proxy-mcp.py')) {
+            $path = Join-Path $candidate.release "bin\$name"
+            if (Test-BridgeProcessOwnership $root $path $candidate.python) {
+                foreach ($base in (Get-BridgeBaseExecutables $candidate.python)) {
+                    $scripts += @{ script = $path; python = $base }
+                }
+            }
+        }
+    }
+    $servers = @($root); $consoleHosts = @()
+    foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction Stop)) {
+        if ($child.ParentProcessId -ne $ProcessId -or -not $child.CreationDate -or $child.CreationDate -lt $root.CreationDate) {
+            throw 'Bridge child ancestry is uncertain; no process was stopped.'
+        }
+        # Never terminate a delegated agent or a newly adopted descendant.
+        if ($ForRestart) {
+            $grandchildren = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($child.ProcessId)" -ErrorAction Stop)
+            if ($grandchildren.Count) { throw 'Bridge has active descendants; checkpoint them before restarting.' }
+        }
+        $owned = $false
+        foreach ($expected in $scripts) {
+            if (Test-BridgeProcessOwnership $child $expected.script $expected.python) { $owned = $true; break }
+        }
+        if ($owned) { $servers += $child; continue }
+        $consolePath = Join-Path $env:SystemRoot 'System32\conhost.exe'
+        if ($child.ExecutablePath -and [string]::Equals([IO.Path]::GetFullPath($child.ExecutablePath), $consolePath, [StringComparison]::OrdinalIgnoreCase)) {
+            # Windows owns console cleanup; this process is never a stop target.
+            $consoleHosts += $child; continue
+        }
+        if ($ForRestart) { throw "Bridge has an unverified child PID $($child.ProcessId); no process was stopped." }
+    }
+    return [pscustomobject]@{ Root = $root; Servers = $servers; ConsoleHosts = $consoleHosts }
+}
+
+function Get-BridgeListeners([int]$Port) {
+    try { return @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop) }
+    catch {
+        if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { return @() }
+        throw
+    }
+}
+
+function Get-BridgeListenerProcess($Tree, [int]$Port) {
+    $owners = @(Get-BridgeListeners $Port | Select-Object -ExpandProperty OwningProcess -Unique)
+    if (-not $owners.Count) { return $null }
+    if ($owners.Count -ne 1 -or -not $Tree -or $owners[0] -notin @($Tree.Servers.ProcessId)) {
+        throw "Port $Port has a listener outside the verified bridge process tree; no process was stopped."
+    }
+    return $owners[0]
+}
+
+function Stop-OwnedBridgeTree($Tree, [int]$Port) {
+    # Preflight the whole tree before stopping anything; then repeat immediately
+    # before each stop to reject PID reuse and new/unknown descendants.
+    $targets = @($Tree.Servers | Sort-Object @{ Expression = { $_.ProcessId -eq $Tree.Root.ProcessId } })
+    foreach ($target in $targets) {
+        $current = Get-OwnedBridgeTree $Tree.Root.ProcessId -ForRestart
+        if (-not $current) {
+            foreach ($remaining in $targets) {
+                if (Get-CimInstance Win32_Process -Filter "ProcessId = $($remaining.ProcessId)" -ErrorAction Stop) {
+                    throw 'Bridge launcher disappeared while a recorded process remains; inspect ownership before restarting.'
+                }
+            }
+            return
+        }
+        foreach ($member in @($current.Servers) + @($current.ConsoleHosts)) {
+            $prior = @(@($Tree.Servers) + @($Tree.ConsoleHosts) | Where-Object { $_.ProcessId -eq $member.ProcessId })
+            if ($prior.Count -ne 1 -or $prior[0].CreationDate -ne $member.CreationDate -or $prior[0].ExecutablePath -ne $member.ExecutablePath -or $prior[0].CommandLine -ne $member.CommandLine) {
+                throw 'Bridge process identity changed during restart; no further process was stopped.'
+            }
+        }
+        Get-BridgeListenerProcess $current $Port | Out-Null
+        $confirmed = @($current.Servers | Where-Object { $_.ProcessId -eq $target.ProcessId })
+        if (-not $confirmed.Count) { continue }
+        Stop-Process -Id $target.ProcessId -Force -ErrorAction Stop
+        Wait-Process -Id $target.ProcessId -Timeout 10 -ErrorAction SilentlyContinue
+        if (Get-Process -Id $target.ProcessId -ErrorAction SilentlyContinue) { throw 'Owned bridge did not exit; no second listener was started.' }
+    }
 }
 
 function Test-BridgeReady([int]$Port, [int]$ProcessId, [bool]$Secure) {
@@ -70,24 +176,22 @@ function Start-ManagedBridge([string]$Name, [int]$Port, [string]$BindAddress, [b
     try { $launchLock = [IO.File]::Open((Join-Path $BridgeHome "launcher.lock"), 'OpenOrCreate', 'ReadWrite', 'None') }
     catch { throw "Another bridge launcher owns startup. Retry after it finishes." }
     try {
+        # Verify inspection rights before creating a process we could not verify
+        # or clean up. Access-denied inventories must never mean "no listener".
+        Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction Stop | Out-Null
         $pidPath = Join-Path $BridgeHome "$Name.pid"
         $oldId = 0
         if (Test-Path $pidPath) {
             if (-not [int]::TryParse((Get-Content $pidPath -Raw).Trim(), [ref]$oldId)) { throw "Invalid bridge PID record; inspect it before restarting." }
-            $oldProcess = Get-OwnedBridgeProcess $oldId
-            if ($oldProcess) {
-                if (Test-BridgeReady $Port $oldId $Secure) { Write-Output "OK: $Name PID=$oldId ready at release $BuildRevision"; return }
+            $oldTree = Get-OwnedBridgeTree $oldId
+            if ($oldTree) {
+                $listenerId = Get-BridgeListenerProcess $oldTree $Port
+                if ($listenerId -and (Test-BridgeReady $Port $listenerId $Secure)) { Write-Output "OK: $Name launcher=$oldId server=$listenerId ready at release $BuildRevision"; return }
                 if (-not $Restart) { throw "Bridge PID $oldId has another release or is not ready. Checkpoint active tasks, then explicitly invoke this launcher with -Restart." }
-                # Recheck ownership immediately before acting on a reused PID.
-                $confirmed = Get-OwnedBridgeProcess $oldId
-                if ($confirmed -and $confirmed.CreationDate -eq $oldProcess.CreationDate) {
-                    Stop-Process -Id $oldId -ErrorAction Stop
-                    Wait-Process -Id $oldId -Timeout 10 -ErrorAction SilentlyContinue
-                    if (Get-Process -Id $oldId -ErrorAction SilentlyContinue) { throw "Owned bridge did not exit; no second listener was started." }
-                }
+                Stop-OwnedBridgeTree $oldTree $Port
             }
         }
-        $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+        $listeners = @(Get-BridgeListeners $Port)
         if ($listeners.Count) { throw "Port $Port already has a listener without a verified matching PID record; no process was stopped." }
         $env:AGENT_BRIDGE_SECURE_NETWORK = if ($Secure) { "1" } else { "0" }
         $env:HERMES_BRIDGE_SECURE_NETWORK = $env:AGENT_BRIDGE_SECURE_NETWORK
@@ -97,7 +201,9 @@ function Start-ManagedBridge([string]$Name, [int]$Port, [string]$BindAddress, [b
         $process.Id | Set-Content $pidPath -NoNewline
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
             if ($process.HasExited) { throw "$Name exited before readiness; inspect its local error log." }
-            if (Test-BridgeReady $Port $process.Id $Secure) { Write-Output "OK: $Name PID=$($process.Id) ready on port $Port at release $BuildRevision"; return }
+            $tree = Get-OwnedBridgeTree $process.Id
+            $listenerId = Get-BridgeListenerProcess $tree $Port
+            if ($listenerId -and (Test-BridgeReady $Port $listenerId $Secure)) { Write-Output "OK: $Name launcher=$($process.Id) server=$listenerId ready on port $Port at release $BuildRevision"; return }
             Start-Sleep -Milliseconds 500
             $process.Refresh()
         }

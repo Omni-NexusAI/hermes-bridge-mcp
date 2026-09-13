@@ -194,9 +194,11 @@ $BridgeScript = Join-Path $Release 'bin/agent-bridge-mcp.py'; $BuildRevision = '
 New-Item -ItemType Directory -Force $BridgeHome | Out-Null
 $script:stopped = $false; $script:started = $false; $script:wrongOwner = $false
 function Get-CimInstance {
-    return [pscustomobject]@{ ProcessId = 123; ExecutablePath = $(if ($script:wrongOwner) { 'C:\\unrelated.exe' } else { $PythonExe }); CommandLine = ('"' + $PythonExe + '" "' + $BridgeScript + '"'); CreationDate = 42 }
+    param($ClassName, $Filter)
+    if ($Filter -like 'ParentProcessId*') { return @() }
+    return [pscustomobject]@{ ProcessId = $(if ($script:started) {222} else {123}); ExecutablePath = $(if ($script:wrongOwner) { 'C:\\unrelated.exe' } else { $PythonExe }); CommandLine = ('"' + $PythonExe + '" "' + $BridgeScript + '"'); CreationDate = 42 }
 }
-function Get-NetTCPConnection { return @() }
+function Get-NetTCPConnection { if ($script:started) { return [pscustomobject]@{OwningProcess = 222} }; return @() }
 function Stop-Process { $script:stopped = $true; throw 'must not stop' }
 function Test-BridgeReady { return $script:started }
 function Start-Process {
@@ -216,6 +218,7 @@ try { Start-ManagedBridge 'test' 49123 '127.0.0.1' -Restart; throw 'wrong owner 
 catch { if ($_.Exception.Message -notmatch 'verified bridge executable') { throw } }
 if ($script:stopped -or $script:started) { throw 'wrong owner was interrupted' }
 Remove-Item -LiteralPath (Join-Path $BridgeHome 'test.pid')
+$script:wrongOwner = $false
 $env:AGENT_BRIDGE_SECURE_NETWORK = '1'; $env:HERMES_BRIDGE_SECURE_NETWORK = '1'
 Start-ManagedBridge 'test' 49123 '127.0.0.1'
 if ($env:AGENT_BRIDGE_SECURE_NETWORK -ne '0' -or $env:HERMES_BRIDGE_SECURE_NETWORK -ne '0') { throw 'local TLS environment not cleared' }

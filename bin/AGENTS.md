@@ -48,6 +48,12 @@ Runtime code and launchers for local delegation, peer networking, discovery, pai
   Windows launchers verify executable/script ownership and matching readiness,
   process ID and build revision. Restart only after checkpointing affected tasks;
   watchdog aliases share one owner lock and never kill an unhealthy process implicitly.
+- Windows venv PID records identify the launcher; readiness identifies the actual
+  listener within its verified process tree. Redirector children must match the
+  venv's declared base interpreter, exact bridge script, ancestry and creation time.
+  Explicit restart stops the verified interpreter before its launcher, refuses
+  active or unknown descendants and reused process IDs, and leaves direct system
+  console-host cleanup to Windows. Inspection failures must prevent new launches.
 - `hermes_bridge_network.py` owns device identity, managed peer state, durable revocations, mDNS, pairing HTTP routes, pinned TLS, signed introductions, and recovery.
 - Managed secrets live only in restricted `bridge-state/network` files; public MCP status must expose booleans and fingerprints, never credentials.
 - Pairing and rekey routes accept only bounded requests from loopback, private, link-local, or official Tailscale source ranges; Tailscale ranges require the Tailscale backend.
