@@ -177,6 +177,13 @@ class UniversalAgentRegistry:
         return _env("TEST_SANDBOX") == "1" and _env("STUB_DELEGATE") == "1"
 
     def _codex_manifest(self) -> dict[str, Any]:
+        if _env("ENABLE_CODEX_ADAPTER", "0") != "1":
+            return {
+                "id": "codex", "display_name": "Codex (retired bridge integration)",
+                "kind": "cli", "enabled": False, "available": False, "builtin": True,
+                "reason": "Disabled by default. Use native Codex Desktop connections for Codex-to-Codex communication. The retained CLI adapter is experimental and does not attach to Desktop conversations.",
+                "capabilities": {"desktop_conversation_owner": False},
+            }
         executable = _env("CODEX_EXE") or shutil.which("codex")
         if not executable:
             return {

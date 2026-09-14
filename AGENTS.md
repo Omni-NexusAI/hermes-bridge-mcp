@@ -9,6 +9,9 @@
   keep them separate from the exact 11-tool compatibility contract.
 - `conversation_routing_v1` adds optional host-mapped owner conversation tools
   and lossless result retrieval; preserve all fifteen earlier schemas exactly.
+- Existing Codex Desktop routing is unfinished and disabled by default. Retire
+  its client tools and default receiving adapter while preserving Codex-to-Hermes,
+  other host-enabled frameworks, lossless results, and historical state.
 - Pairing MCP Prompts are optional discovery conveniences; pairing tools remain
   authoritative and compatibility commands remain available for clients that
   do not expose MCP Prompts.

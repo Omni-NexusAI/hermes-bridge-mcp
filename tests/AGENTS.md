@@ -31,6 +31,10 @@ Automated verification for the bridge's compatibility, security, discovery, pair
   declarative MCP and CLI adapters, unknown/disabled agents, malformed
   manifests, injection resistance, secret redaction, cancellation, timeouts,
   Codex `threadId`/`sessionId`, and caller-scoped conversation persistence.
+- Verify default Codex retirement without probing installed agents, preserve cached
+  replies and pending work, and explicitly opt into synthetic legacy Codex tests.
+- Verify framework switching and return-to-framework context with isolated adapters;
+  unknown or disabled framework IDs must fail without falling back to Hermes.
 - Verify canonical environment precedence, compatibility-aware state paths,
   dual discovery registration, and legacy-peer rejection for universal calls.
 - Cover approval, rejection, replay, expiry, certificate mismatch, revocation, restart, endpoint change, and identity-preserving rekey.

@@ -1,8 +1,67 @@
-# Codex owner conversation routing
+# Codex integration: unfinished and disabled
+
+Existing Codex Desktop conversation attachment is **unfinished**, not a supported
+bridge feature. Use native Codex Desktop connections for Codex-to-Codex work.
+The separate CLI adapter produced genuine Codex replies and retained follow-up
+context, but those bridge-managed sessions never proved Desktop attachment.
+
+Both integrations are disabled by default. This does not remove Codex as an MCP
+client: keep its Agent Bridge server entry to communicate with Hermes or other
+enabled frameworks. The eleven core and four universal tool schemas are unchanged.
+Lossless result retrieval stays available and retained histories are not deleted.
+
+## Retire an existing installation
+
+- Disable the receiving `codex` adapter in host-owned `agents.json` using
+  `enabled: false` and `replace_builtin: true`; retain the manifest's adapter
+  kind and command. Disable any separately named Codex test adapters too.
+- In Codex's bridge MCP entry, add the eight `bridge_agent_` / `bridge_peer_`
+  tools ending in `projects_list`, `conversations_list`, `conversation_read`,
+  or `routed_delegate_start` to `disabled_tools`. Preserve other existing filters.
+  Keep the server, universal tools, and `complete_result` tools enabled.
+- Preserve owner mappings and task history as recovery data. Do not edit Codex
+  session databases, remove Codex itself, or change bridge pairings/credentials.
+- Existing clients may need an MCP reconnect to refresh tool visibility. Let
+  active work finish before any required reload.
+
+For an installation without an `agents.json`, the following host-owned manifest
+disables only the built-in Codex recipient. If the file already exists, merge the
+record into its `agents` array and preserve every other adapter and setting.
+
+```json
+{
+  "schema_version": 1,
+  "agents": [
+    {
+      "id": "codex",
+      "kind": "cli",
+      "enabled": false,
+      "replace_builtin": true,
+      "command": ["codex", "exec", "{prompt}"]
+    }
+  ]
+}
+```
+
+Verify retirement against the running bridge: `bridge_agent_universal_list`
+must show Codex disabled and the intended remaining frameworks enabled. A
+Codex-targeted universal start must return `agent_unavailable` without a task ID.
+Check Codex's effective MCP configuration for the eight disabled tools as well;
+a server-side tool listing does not reflect the client's filter. This configuration
+procedure also works on older payloads; installing this source revision additionally
+hides the owner tools from the server's default tool catalogue.
+
+## Retained experimental implementation
+
+The following protocol notes describe unaccepted development code. Source-level
+experiments must explicitly opt in with `AGENT_BRIDGE_ENABLE_CODEX_OWNER_ROUTING=1`.
+The historical built-in CLI adapter separately requires
+`AGENT_BRIDGE_ENABLE_CODEX_ADAPTER=1` (or an explicit host replacement manifest).
+These flags do not establish that an existing Desktop owner is attachable.
 
 `conversation_routing_v1` is an optional extension. The eleven core tools and four
 `universal_agent_v1` tools preserve their exact schemas and established adapter paths.
-The Codex MCP adapter remains available independently of owner routing.
+The retained Codex adapter remains separate from owner routing.
 
 Configure `bridge-state/codex-owner.json` on each host, or set
 `AGENT_BRIDGE_CODEX_OWNER_CONFIG` to a host-owned file. Start from

@@ -14,6 +14,16 @@ from agent_bridge_storage import AtomicJsonStore, StorageError, conversation_loc
 EXTENSION = "conversation_routing_v1"
 TOOLS = tuple("bridge_" + side + "_" + name for side in ("agent", "peer")
               for name in ("projects_list", "conversations_list", "conversation_read", "routed_delegate_start", "complete_result"))
+RESULT_TOOLS = tuple(name for name in TOOLS if name.endswith("_complete_result"))
+
+
+def owner_routing_enabled():
+    return os.environ.get("AGENT_BRIDGE_ENABLE_CODEX_OWNER_ROUTING",
+                          os.environ.get("HERMES_BRIDGE_ENABLE_CODEX_OWNER_ROUTING", "0")) == "1"
+
+
+def advertised_tools():
+    return TOOLS if owner_routing_enabled() else RESULT_TOOLS
 
 
 class ConversationRuntime:
@@ -27,6 +37,8 @@ class ConversationRuntime:
     def router(self):
         if self.router_factory is not None:
             return self.router_factory()
+        if not owner_routing_enabled():
+            raise CodexRoutingError("integration_disabled", "Codex Desktop owner routing is unfinished and disabled. Use native Codex Desktop connections; retained bridge-managed CLI sessions are not Desktop attachment.")
         path = Path(os.environ.get("AGENT_BRIDGE_CODEX_OWNER_CONFIG") or
                     os.environ.get("HERMES_BRIDGE_CODEX_OWNER_CONFIG") or self.state_dir / "codex-owner.json")
         if not path.exists():
@@ -34,6 +46,11 @@ class ConversationRuntime:
         return CodexConversationRouter(self.state_dir, AtomicJsonStore(path).read())
 
     def capabilities(self):
+        if self.router_factory is None and not owner_routing_enabled():
+            return {"extension": EXTENSION, "configured": False, "enabled": False,
+                    "support_status": "unfinished", "error": "integration_disabled",
+                    "message": "Use native Codex Desktop connections for existing Desktop tasks.",
+                    "tools": [], "result_tools": list(RESULT_TOOLS)}
         try:
             router = self.router()
             router._owner()
@@ -147,6 +164,8 @@ class ConversationRuntime:
         Workers reconcile the router record before doing anything. A persisted
         sending/creating/unknown outcome never re-enters delivery.
         """
+        if self.router_factory is None and not owner_routing_enabled():
+            return {"scheduled": []}
         scheduled = []
         for task_id, record in self.jobs.read().items():
             if record.get("status") in {"pending", "queued"} and self._launch(task_id):
@@ -172,6 +191,9 @@ class ConversationRuntime:
             raise CodexRoutingError("task_not_found", "No routed task exists for this caller")
         if record.get("status") in {"completed", "canceled"}:
             return self.public(record)
+        if self.router_factory is None and not owner_routing_enabled():
+            return self.public(dict(record, error_code="integration_disabled",
+                                    action="Unfinished Desktop integration is disabled; retained work was not resumed or resent."))
         try:
             result = self.router().result(task_id, caller)
             record = self._save(task_id, result)
@@ -209,6 +231,9 @@ class ConversationRuntime:
 
 
 def add_conversation_tools(mcp, runtime, caller_peer, peer_call, load_task, access_allowed=lambda: True):
+    def owner_tool(func):
+        return mcp.tool()(func) if owner_routing_enabled() else func
+
     def output(action):
         try:
             if not access_allowed():
@@ -235,22 +260,22 @@ def add_conversation_tools(mcp, runtime, caller_peer, peer_call, load_task, acce
                       result_complete=record.get("status") == "completed")
         return public
 
-    @mcp.tool()
+    @owner_tool
     def bridge_agent_projects_list() -> str:
         """List host-owned project mappings for optional Codex conversation routing."""
         return output(lambda: {"extension": EXTENSION, "projects": runtime.router().projects()})
 
-    @mcp.tool()
+    @owner_tool
     def bridge_agent_conversations_list(project: Optional[dict] = None) -> str:
         """Discover existing owner conversations under a repository identity or mapped project id."""
         return output(lambda: {"conversations": runtime.router().conversations(project)})
 
-    @mcp.tool()
+    @owner_tool
     def bridge_agent_conversation_read(conversation_id: str, project: Optional[dict] = None) -> str:
         """Read relevant owner conversation context, verifying the host project association."""
         return output(lambda: runtime.router().read(conversation_id, project))
 
-    @mcp.tool()
+    @owner_tool
     def bridge_agent_routed_delegate_start(request_id: str, prompt: str, topic: str,
             project: Optional[dict] = None, context: Optional[dict] = None,
             conversation_id: Optional[str] = None, delivery_mode: str = "queue",
@@ -261,25 +286,25 @@ def add_conversation_tools(mcp, runtime, caller_peer, peer_call, load_task, acce
 
     @mcp.tool()
     def bridge_agent_complete_result(task_id: str, offset: int = 0, limit: int = 64000) -> str:
-        """Resume a safely queued request and retrieve its reply in lossless pages, with target, delivery reason, and actual owner status."""
+        """Retrieve full task replies in lossless pages; retired owner work is retained without resuming delivery."""
         return output(lambda: complete(task_id, offset, limit))
 
-    @mcp.tool()
+    @owner_tool
     def bridge_peer_projects_list(peer_id: str) -> str:
         """List project mappings on a paired, authenticated peer."""
         return output(lambda: peer_call(peer_id, "bridge_agent_projects_list", {}))
 
-    @mcp.tool()
+    @owner_tool
     def bridge_peer_conversations_list(peer_id: str, project: Optional[dict] = None) -> str:
         """Discover relevant existing conversations on a paired peer."""
         return output(lambda: peer_call(peer_id, "bridge_agent_conversations_list", {"project": project}))
 
-    @mcp.tool()
+    @owner_tool
     def bridge_peer_conversation_read(peer_id: str, conversation_id: str, project: Optional[dict] = None) -> str:
         """Read selected conversation context from a paired peer's owning server."""
         return output(lambda: peer_call(peer_id, "bridge_agent_conversation_read", {"conversation_id": conversation_id, "project": project}))
 
-    @mcp.tool()
+    @owner_tool
     def bridge_peer_routed_delegate_start(peer_id: str, request_id: str, prompt: str, topic: str,
             project: Optional[dict] = None, context: Optional[dict] = None,
             conversation_id: Optional[str] = None, delivery_mode: str = "queue",
@@ -292,5 +317,5 @@ def add_conversation_tools(mcp, runtime, caller_peer, peer_call, load_task, acce
 
     @mcp.tool()
     def bridge_peer_complete_result(peer_id: str, task_id: str, offset: int = 0, limit: int = 64000) -> str:
-        """Resume safely queued work and retrieve actual replies and route evidence from a paired peer without truncation loss."""
+        """Retrieve full task replies and route evidence from a paired peer without truncation loss."""
         return output(lambda: peer_call(peer_id, "bridge_agent_complete_result", {"task_id": task_id, "offset": offset, "limit": limit}))

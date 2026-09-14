@@ -15,6 +15,8 @@ from agent_bridge_universal import UniversalAdapterError, UniversalAgentRegistry
 
 
 def _registry(tmp_path, monkeypatch, command_probe=lambda command: "mcp-server"):
+    # Retained Codex adapter tests explicitly opt into the experimental path.
+    monkeypatch.setenv("AGENT_BRIDGE_ENABLE_CODEX_ADAPTER", "1")
     monkeypatch.setenv("AGENT_BRIDGE_TEST_SANDBOX", "1")
     monkeypatch.setenv("AGENT_BRIDGE_STUB_DELEGATE", "1")
     monkeypatch.setenv("AGENT_BRIDGE_CODEX_EXE", "codex-test")

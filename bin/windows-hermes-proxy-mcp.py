@@ -210,6 +210,7 @@ from agent_bridge_universal import UniversalAdapterError, UniversalAgentRegistry
 from agent_bridge_storage import AtomicJsonStore, StorageError, conversation_lock, process_alive  # noqa: E402
 from agent_bridge_codex import CodexRoutingError  # noqa: E402
 from agent_bridge_conversations import ConversationRuntime, TOOLS as CONVERSATION_EXTENSION_TOOLS, add_conversation_tools  # noqa: E402
+from agent_bridge_conversations import advertised_tools, owner_routing_enabled  # noqa: E402
 
 os.environ.setdefault("AGENT_BRIDGE_VERSION", BRIDGE_VERSION)
 os.environ["HERMES_BRIDGE_VERSION"] = os.environ["AGENT_BRIDGE_VERSION"]
@@ -1474,14 +1475,18 @@ def _peer_universal_call(
             "peer_id": peer_id,
             "remote_tool_called": tool_name,
             "next_action": (
-                "Use the legacy Hermes bridge_peer_* tools or update the remote "
-                "bridge to Agent Bridge MCP v1.3.5 or newer."
+                "The requested framework cannot be selected on this peer. Update the "
+                "peer or choose a supported destination; never substitute Hermes "
+                "unless the user requested Hermes."
             ),
         }
     return result
 
 
 def _peer_conversation_call(peer_id, tool_name, arguments):
+    result_only = tool_name == "bridge_agent_complete_result"
+    if not result_only and not owner_routing_enabled():
+        return {"error": "integration_disabled", "message": "Codex Desktop routing is unfinished and disabled; use native Codex Desktop connections."}
     peer, error = _get_peer(peer_id)
     if error:
         return _peer_error_response(peer_id, error, peer)
@@ -1489,7 +1494,9 @@ def _peer_conversation_call(peer_id, tool_name, arguments):
         return {"error": "extension_unsupported", "message": "Conversation routing requires an authenticated, certificate-pinned managed peer"}
     status = _peer_call(peer_id, "bridge_agent_status", {})
     contract = status.get("remote", status).get("public_tool_contract", {})
-    if contract.get("conversation_routing_extension") != "conversation_routing_v1":
+    if contract.get("conversation_routing_extension") != "conversation_routing_v1" and not (
+        result_only and tool_name in contract.get("extension_tools", [])
+    ):
         return {"error": "extension_unsupported", "message": "Peer has not advertised conversation_routing_v1", "peer_id": peer_id}
     return _peer_call(peer_id, tool_name, arguments)
 
@@ -1568,18 +1575,19 @@ def add_bridge_tools(mcp):
             "tool_routing": {
                 "local_tools": "bridge_agent_*",
                 "network_peer_tools": "bridge_peer_*",
-                "rule": "Use bridge_agent_* only for the local Hermes agent on this same bridge endpoint. Use bridge_peer_* with peer_id for any other configured machine or device on the network.",
+                "rule": "Resolve the requested machine and framework separately. Legacy delegate tools always target Hermes. For another enabled framework, discover it with the local or peer universal_list tool and pass its exact agent ID to universal_delegate_start. Never fall back to Hermes for a different requested framework. Use native Codex Desktop task tools for existing Codex conversations.",
                 "peer_discovery": "Call bridge_agent_status to inspect configured_peers before using bridge_peer_*.",
             },
             "public_tool_contract": {
                 "default_tool_count": len(DEFAULT_PUBLIC_TOOLS),
                 "default_tools": list(DEFAULT_PUBLIC_TOOLS),
-                "extension_tools": list(NETWORK_EXTENSION_TOOLS + UNIVERSAL_EXTENSION_TOOLS + CONVERSATION_EXTENSION_TOOLS),
+                "extension_tools": list(NETWORK_EXTENSION_TOOLS + UNIVERSAL_EXTENSION_TOOLS + advertised_tools()),
                 "automatic_pairing_extension": "automatic_pairing_v1",
                 "universal_agent_extension": "universal_agent_v1",
                 "universal_tools": list(UNIVERSAL_EXTENSION_TOOLS),
-                "conversation_routing_extension": "conversation_routing_v1",
-                "conversation_tools": list(CONVERSATION_EXTENSION_TOOLS),
+                "conversation_routing_extension": "conversation_routing_v1" if owner_routing_enabled() else None,
+                "conversation_routing_support": "unfinished",
+                "conversation_tools": list(advertised_tools()),
                 "legacy_windows_tools_env": "HERMES_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS",
                 "stable_since": MIN_COMPATIBLE_BRIDGE_VERSION,
             },
@@ -1709,7 +1717,7 @@ def add_bridge_tools(mcp):
         if not status:
             return _json({"error": f"task not found: {task_id}"})
         if status.get("status") not in {"completed", "failed", "timed_out", "canceled"}:
-            status["message"] = "Delegation is still running without interrupting the Hermes session. Poll again later."
+            status["message"] = "The selected agent's task is still running. Poll again later."
         return _json(status)
 
     @legacy_windows_tool
@@ -2071,10 +2079,15 @@ def _create_delegate_only_server(
     return _BearerOnlyFastMCP(
         "agent-bridge",
         instructions=(
-            "Agent Bridge MCP has local and peer tool families. Use "
-            "bridge_agent_* only for the local Hermes agent; those existing "
-            "calls remain Hermes-compatible. Use "
-            "bridge_agent_universal_* to select an enabled local agent adapter. Never "
+            "Resolve the user's destination machine and requested framework separately. "
+            "The legacy bridge_agent_delegate and bridge_peer_delegate_start tools "
+            "always target Hermes. Discover enabled frameworks with "
+            "bridge_agent_universal_list or bridge_peer_universal_list, then select "
+            "the exact agent ID with the matching universal_delegate_start tool. "
+            "Never substitute Hermes for an unknown, disabled, or unavailable framework. "
+            "Keep conversation keys stable for follow-ups; framework sessions remain separate. "
+            "For existing Codex Desktop tasks use native Codex app task controls: "
+            "bridge Desktop routing is unfinished and disabled by default. Never "
             "use bridge_agent_* to reach another machine, headset, phone, or "
             "network device. Use bridge_peer_* with peer_id for legacy Hermes "
             "delegation, or bridge_peer_universal_* to select an agent on an "

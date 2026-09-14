@@ -1,11 +1,15 @@
 # Agent Bridge MCP
 
-Compatibility version: `v1.3.5`; reliability and owner-routing candidate identified by its payload build revision.
+Compatibility version: `v1.3.5`; runtime changes are identified by their payload build revision.
 
 Agent Bridge MCP is a universal, secure MCP delegation bridge. An MCP-compatible
-caller can select Hermes, Codex, A0, or another host-enabled adapter locally or
+caller, including Codex, can select Hermes, A0, or another host-enabled adapter locally or
 on a paired device. `peer_id` selects the device and `agent` selects the agent
 architecture on that device.
+
+**Codex-to-Codex Desktop routing is unfinished and disabled by default.** Use
+Codex's native Desktop connections for existing Codex conversations. Codex can
+continue using this bridge to communicate with Hermes and other enabled frameworks.
 
 The canonical MCP identifier is `agent-bridge`, the environment prefix is
 `AGENT_BRIDGE_*`, and delegated Hermes work uses the source label
@@ -25,7 +29,7 @@ bridge anymore; install Hermes messaging integrations separately if needed.
 - `bridge_agent_delegate_status`
 - `bridge_agent_delegate_result`
 - `bridge_agent_delegate_cancel`
-- `bridge_peer_*` tools for authenticated Hermes-to-Hermes delegation
+- `bridge_peer_*` tools for authenticated delegation to Hermes on paired devices
 - `bridge_network_status` for discovered, paired, revoked, and recovering peers
 - `bridge_peer_pair` for explicit approval, rejection, revocation, and reconnection
 - `bridge_peer_unpair` for fingerprint-checked, coordinated removal or forced local forget
@@ -33,11 +37,8 @@ bridge anymore; install Hermes messaging integrations separately if needed.
 - `bridge_agent_universal_delegate_start`
 - `bridge_peer_universal_list`
 - `bridge_peer_universal_delegate_start`
-- Optional `bridge_agent_projects_list`, `bridge_agent_conversations_list`,
-  `bridge_agent_conversation_read`, and `bridge_agent_routed_delegate_start`
-  (with corresponding `bridge_peer_*` tools).
 - `bridge_agent_complete_result` and `bridge_peer_complete_result` for lossless
-  reply retrieval, including target conversation and delivery evidence.
+  reply retrieval across retained tasks.
 
 Legacy `windows_agent_*` aliases are hidden by default. Set
 `AGENT_BRIDGE_ENABLE_LEGACY_WINDOWS_TOOLS=1` only for older bridge clients that
@@ -59,6 +60,12 @@ Use `bridge_peer_universal_list(peer_id)` and
 These tools require an authenticated, certificate-pinned managed pairing.
 Agent capabilities are returned only after authentication and are never
 included in public discovery advertisements.
+
+When the user requests a different framework, discover the adapters on the
+requested device, then select that adapter's exact `agent` ID. Keep the same
+conversation key for follow-ups; sessions remain separate for each framework.
+Never substitute Hermes when the requested framework is missing or disabled.
+Ask for clarification if the requested device or framework is ambiguous.
 
 `bridge_agent_delegate` runs the task through the local Hermes Bridge agent:
 
@@ -89,13 +96,12 @@ It does not expose a raw PowerShell or CMD proxy.
 - A declarative MCP stdio or HTTP tool/field mapping.
 - A declarative argument-array CLI adapter.
 
-Hermes and Codex manifests are auto-detected. Codex supports current
-`codex mcp-server`/`threadId` and legacy `codex mcp`/`sessionId` variants.
-This MCP adapter creates or continues bridge-managed Codex tasks. The optional
-owner-routing adapter can reuse existing conversations only when the host exposes
-the server that actually owns those conversations. Desktop attachment and Desktop
-project registration must be validated on the installed host; configuration alone
-does not establish either capability. See [owner routing](docs/codex-owner-routing.md).
+Hermes is auto-detected. The retained Codex CLI adapter is disabled by default;
+its separate bridge-managed sessions were tested, but they did not attach to
+existing Desktop conversations. The unfinished Desktop owner-routing tools are
+also hidden by default. Neither integration is needed for Codex to call Hermes.
+See [retired Codex integration](docs/codex-owner-routing.md) for status and removal
+from an existing Codex client without uninstalling the rest of the bridge.
 
 Additional adapters are configured by the host in `agents.json`; see
 [`config/agents.example.json`](config/agents.example.json). Remote requests can
